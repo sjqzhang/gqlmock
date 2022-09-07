@@ -48,7 +48,8 @@ def consumer():
         go run server.go
         '''
         # print(cli.execute_shell(shell))
-        t = threading.Thread(target=cli.execute_shell, args=(shell,))
+        t = threading.Thread(target=cli.execute_shell, args=(shell,20,))
+        t.setDaemon(True)
         t.start()
         timeout = 0
         while True:
@@ -57,6 +58,7 @@ def consumer():
             if cli.check_port(port=8080):
                 data = requests.post('http://127.0.0.1:8080/query', json=QUERY).json()
                 GRAPHQLS[item['project']] = {'data': data, 'schemas': item['schemas']}
+                requests.get('http://127.0.0.1:8080/exit')
             else:
                 if timeout > 30:
                     break
@@ -71,6 +73,15 @@ def upload_form():
     return render_template('upload.html')
 
 
+@app.route('/schema')
+def get_schema():
+    project = request.args.get('project')
+    data= GRAPHQLS.get(project)
+    if data is not None:
+        return data['schemas']
+    else:
+        return 'not found'
+
 @app.route('/query')
 def query():
     project = request.args.get('project')
@@ -80,7 +91,7 @@ def query():
     else:
         return 'not found'
 
-
+@cli.try_except()
 @app.route('/', methods=['POST'])
 def upload_file():
     if request.method == 'POST':
