@@ -1,0 +1,4327 @@
+#!/usr/bin/env python
+# -*- coding:utf-8 -*-
+__author__ = 'xiaozhang'
+
+import os
+import signal
+import sys
+
+import atexit
+
+PY2 = sys.version_info[0] == 2
+PY3 = sys.version_info[0] == 3
+import urllib
+
+if PY2:
+    import urllib2 as urllib2
+    import httplib
+    from urlparse import urlparse
+    import Queue as queue
+
+    reload(sys)
+    try:
+        sys.setdefaultencoding('utf-8')
+    except Exception as er:
+        import sys
+
+        sys.path.append(os.path.dirname(os.path.__file__) + os.path.sep + 'encodings/')
+        import codecs
+        import utf_8
+
+        codecs.register(lambda encoding: utf_8.getregentry())
+if PY3:
+    import urllib.request as urllib2
+    import queue as queue
+    from urllib.parse import urlparse
+
+    urllib.urlencode = urllib.parse.urlencode
+    import http.client as httplib
+
+import subprocess
+import time
+import datetime
+import re
+import logging
+import hashlib
+import base64
+
+import tempfile
+import threading
+import getopt
+from logging.handlers import RotatingFileHandler
+import json
+import random
+import platform
+import socket
+
+import uuid
+import inspect
+import getpass
+
+pub_key = ''
+pidfile = "/var/cli.pid"
+server_url = 'server_url'
+server_url = 'http://127.0.0.1:9160'  # server_url
+CLI_GROUP = 'cli_group'
+CLI_GROUP = 'default'
+CLI_PUBLIC_KEY = 'pub_key'
+
+configfile = '/etc/cli'
+config_file_extend = '/var/lib/cli/extend.json'
+default_module = 'cli'
+bin_name = 'cli'
+client_filename = '/bin/%s' % bin_name
+script_path = tempfile.gettempdir() + os.path.sep + 'script'
+global_debug = False
+os.environ['PYTHONUNBUFFERED'] = '1'
+
+PLATFORM = platform.system().lower()
+PYTHON_PATH = '/usr/bin/python'
+CLI_VERSION = '2.0.20171120'
+
+PYTHON_PATHS = ['/usr/bin/python', '/usr/bin/python2', '/usr/bin/python3',
+                '/usr/local/bin/python', '/usr/local/bin/python2', '/usr/local/bin/python3']
+for p in PYTHON_PATHS:
+    if os.path.exists(p):
+        PYTHON_PATH = p
+        break
+
+PROCESS = {}
+
+CMD_ADD_CI_ADMIN = '''
+#!/bin/bash
+source /etc/profile
+chattr -i /etc/passwd /etc/shadow /etc/group /etc/gshadow
+useradd cli_admin
+su - cli_admin -c "mkdir /home/cli_admin/.ssh"
+su - cli_admin -c "chmod 700 /home/cli_admin/.ssh"
+su - cli_admin -c "cat>> /home/cli_admin/.ssh/authorized_keys<<EOF
+%s
+EOF
+"
+su - cli_admin -c "cat /home/cli_admin/.ssh/authorized_keys|sort|uniq > /tmp/cli_pub_key && cat /tmp/cli_pub_key > /home/cli_admin/.ssh/authorized_keys && rm -f /tmp/cli_pub_key"
+su - cli_admin -c "chmod 600 /home/cli_admin/.ssh/authorized_keys" 
+chattr +i /etc/passwd /etc/shadow /etc/group /etc/gshadow
+
+if [ "$(grep "cli_admin" /etc/sudoers | egrep  -v "^#" | wc -l)" -eq "0" ];then
+    chattr -i /etc/sudoers
+    echo "cli_admin ALL=(ALL) NOPASSWD:/bin/chmod,/bin/cli,/usr/bin/wget" >> /etc/sudoers
+    chattr +i /etc/sudoers
+fi
+''' % (CLI_PUBLIC_KEY)
+
+CONF = {
+    "labels": []
+}
+
+
+def init_log():
+    dirs = ['/tmp/', '/var/', '/etc/', '/bin/', '/var/log/', '/var/lib/cli/']
+    for d in dirs:
+        if not os.path.exists(d):
+            os.mkdir(d)
+    user = getpass.getuser()
+    client_log_filename = '/var/log/cli.log'
+    try:
+        if PLATFORM != 'windows':
+            _p = os.popen('which python').read().strip()
+            if _p != '' and len(_p) > 0:
+                PYTHON_PATH = _p
+    except Exception as er:
+        # print(er)
+        pass
+
+    log_dir = os.path.dirname(client_log_filename)
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
+    # if user=='root':
+    #     os.chmod(log_dir,0666)
+    log_fmt_str = '%(asctime)-25s %(module)s:%(lineno)d  %(levelname)-8s %(message)s'
+    try:
+        logger = {}
+        logger = logging.getLogger('CLI')
+        # try:
+        #     if PY2:
+        #         logging.basicConfig(level=logging.DEBUG,
+        #                             format=log_fmt_str,
+        #                             filemode='a+', filename=client_log_filename)
+        #     if PY3:
+        #         log_fmt_str = '%(asctime)s %(module)s:%(lineno)d  %(levelname)s %(message)s'
+        #         logging.basicConfig(level=logging.DEBUG,
+        #                             format=log_fmt_str, filename=client_log_filename)
+        # except Exception as er:
+        #     pass  # don't print because json output
+        file_handler = RotatingFileHandler(filename=client_log_filename, maxBytes=100 * 1024 * 1024, backupCount=3)
+        # file_handler=TimedRotatingFileHandler(filename=client_log_filename,when='W6', backupCount=4)
+        formatter = logging.Formatter(log_fmt_str)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.setLevel(logging.DEBUG)
+    except Exception as er:
+        pass  # don't print because json output
+    if user == 'root' and PLATFORM != 'windows':
+        try:
+            if len(os.popen('command -v chattr').read()) > 1:
+                os.popen('chattr -a %s' % (client_log_filename)).read()
+                os.chmod(client_log_filename, 766)
+                # os.popen('chattr +a %s'%(client_log_filename)).read()
+        except Exception as er:
+            pass
+            # print(er)  # don't print because json output
+    try:
+        os.chmod('/var/lib/cli/', 766)
+        os.chmod(client_log_filename, 766)
+    except Exception as er:
+        pass
+        # print(er)  # don't print because json output
+    return logger
+
+
+logger = init_log()
+
+
+def init_extend_conf():
+    try:
+        global CONF
+        if os.path.exists(config_file_extend):
+            with open(config_file_extend, 'r') as f:
+                CONF = json.load(f)
+        else:
+            with open(config_file_extend, 'w') as f:
+                json.dump(CONF, f)
+    except Exception as er:
+        logger.error(er)
+
+
+def save_extend_conf():
+    try:
+        with open(config_file_extend, 'w') as f:
+            json.dump(CONF, f)
+    except Exception as er:
+        logger.error(er)
+
+
+init_extend_conf()
+
+try:
+    import ssl
+except Exception as er:
+    logger.error(er)
+
+
+class LongHttp(object):
+    Connections = {}
+
+    def __init__(self):
+        pass
+
+    @staticmethod
+    def digest(url):
+        import hashlib
+        md5 = hashlib.md5()
+        if PY2:
+            md5.update(url.encode('utf-8'))
+        if PY3:
+            md5.update(url.encode('utf-8'))
+        return md5.hexdigest()
+
+    @staticmethod
+    def request(url, data={}, method='GET', headers={}, timeout=30):
+        # ParseResult(scheme='http', netloc='www.baidu.com', path='/index.html', params='', query='', fragment='')
+        url_info = urlparse(url)
+        tid = str(threading.current_thread().ident)
+        md5 = 'thread_%s_' % (tid) + LongHttp.digest(url_info[1])
+
+        def get_connetion(url):
+            if md5 in LongHttp.Connections:
+                conn = LongHttp.Connections[md5]
+                return conn
+            else:
+                url_info = urlparse(url)
+                host = url_info[1]
+                conn = httplib.HTTPConnection(host=host, timeout=timeout)
+                LongHttp.Connections[md5] = conn
+                return conn
+
+        conn = get_connetion(url)
+        params = urllib.urlencode(data)
+        headers['Connection'] = 'keep-alive'
+        # headers['Connection']='close'
+        try:
+            conn.request(method, url_info[2] + '?' + url_info[4], body=params, headers=headers)
+            response = conn.getresponse()
+            return response.read()
+        except Exception as er:
+            del LongHttp.Connections[md5]
+            print(er)
+
+
+# class CertificateError(ValueError):
+#     pass
+# try:
+#     import ssl
+# except ImportError:
+#     ssl = None
+#     import warnings
+#     msg = ("Can't import ssl. HTTPS won't work."
+#            "Run `pip install ssl` if Python < 2.6")
+#     try:
+#         ImportWarning
+#     except NameError:
+#         warnings.warn(msg)
+#     else:
+#         warnings.warn(msg, ImportWarning)
+# else:
+#     try:
+#         from http import client
+#     except ImportError:
+#         import httplib as client
+#     import re
+#     try:
+#         import urllib2 as request
+#     except ImportError:
+#         from urllib import request
+#     class HTTPSConnection(client.HTTPSConnection):
+#         def __init__(self, host, **kwargs):
+#             self.ca_certs = kwargs.pop('ca_certs', None)
+#             self.checker = kwargs.pop('checker', None)
+#             self.timeout = kwargs.get('timeout', socket.getdefaulttimeout())
+#             client.HTTPSConnection.__init__(self, host, **kwargs)
+#
+#
+#         def connect(self):
+#             try:
+#                 args = [(self.host, self.port), self.timeout,]
+#                 if hasattr(self, 'source_address'):
+#                     args.append(self.source_address)
+#                 sock = socket.create_connection(*args)
+#                 if getattr(self, '_tunnel_host', None):
+#                     self.sock = sock
+#                     self._tunnel()
+#                 kwargs = {}
+#                 if self.ca_certs is not None:
+#                     kwargs.update(
+#                         cert_reqs=ssl.CERT_REQUIRED,
+#                         ca_certs=self.ca_certs)
+#                 self.sock = ssl.wrap_socket(sock,
+#                                             keyfile=self.key_file,
+#                                             certfile=self.cert_file,
+#                                             **kwargs)
+#             except Exception as er:
+#                 logger.error(er)
+#             if self.checker is not None:
+#                 try:
+#                     self.checker(self.sock.getpeercert(), self.host)
+#                 except CertificateError:
+#                     self.sock.shutdown(socket.SHUT_RDWR)
+#                     self.sock.close()
+#                 except Exception as er:
+#                     print(er)
+#                     logger.error(er)
+#                     pass
+#     class HTTPSHandler(request.HTTPSHandler):
+#         def __init__(self, key_file=None, cert_file=None, ca_certs=None,
+#                      checker=None):
+#             request.HTTPSHandler.__init__(self)
+#             self.key_file = key_file
+#             self.cert_file = cert_file
+#             self.ca_certs = ca_certs
+#             self.checker = self.match_hostname
+#         def _dnsname_to_pat(self,dn):
+#             pats = []
+#             for frag in dn.split(r'.'):
+#                 if frag == '*':
+#                     pats.append('[^.]+')
+#                 else:
+#                     frag = re.escape(frag)
+#                     pats.append(frag.replace(r'\*', '[^.]*'))
+#             return re.compile(r'\A' + r'\.'.join(pats) + r'\Z', re.IGNORECASE)
+#         def match_hostname(self,cert, hostname):
+#             return
+#             if not cert:
+#                 raise ValueError("empty or no certificate")
+#             dnsnames = []
+#             san = cert.get('subjectAltName', ())
+#             for key, value in san:
+#                 if key == 'DNS':
+#                     if self._dnsname_to_pat(value).match(hostname):
+#                         return
+#                     dnsnames.append(value)
+#             if not dnsnames:
+#                 for sub in cert.get('subject', ()):
+#                     for key, value in sub:
+#                         if key == 'commonName':
+#                             if self._dnsname_to_pat(value).match(hostname):
+#                                 return
+#                             dnsnames.append(value)
+#
+#             if len(dnsnames) > 1:
+#                 raise CertificateError("hostname %r "
+#                     "doesn't match either of %s"
+#                     % (hostname, ', '.join(map(repr, dnsnames))))
+#             elif len(dnsnames) == 1:
+#                 raise CertificateError("hostname %r "
+#                     "doesn't match %r"
+#                     % (hostname, dnsnames[0]))
+#             else:
+#                 raise CertificateError("no appropriate commonName or "
+#                     "subjectAltName fields were found")
+#         def https_open(self, req):
+#             return self.do_open(self.getConnection, req)
+#         def getConnection(self, host, **kwargs):
+#             d = dict(cert_file=self.cert_file,
+#                      key_file=self.key_file,
+#                      ca_certs=self.ca_certs,
+#                      checker=self.checker)
+#             d.update(kwargs)
+#             return HTTPSConnection(host, **d)
+
+
+class Daemon:
+    '''
+    a generic daemon class.
+    usage: subclass the CDaemon class and override the run() method
+    stderr  表示错误日志文件绝对路径, 收集启动过程中的错误日志
+    verbose 表示将启动运行过程中的异常错误信息打印到终端,便于调试,建议非调试模式下关闭, 默认为1, 表示开启
+    save_path 表示守护进程pid文件的绝对路径
+    '''
+
+    def __init__(self, save_path, stdin=os.devnull, stdout=os.devnull, stderr=os.devnull, home_dir='.', umask=0x22,
+                 verbose=1):
+        self.stdin = stdin
+        self.stdout = stdout
+        self.stderr = stderr
+        self.pidfile = save_path  # pid文件绝对路径
+        self.home_dir = home_dir
+        self.verbose = verbose  # 调试开关
+        self.umask = umask
+        self.daemon_alive = True
+
+    def daemonize(self):
+        try:
+            pid = os.fork()
+            if pid > 0:
+                sys.exit(0)
+        except OSError as e:
+            sys.stderr.write('fork #1 failed: %d (%s)\n' % (e.errno, e.strerror))
+            sys.exit(1)
+
+        os.chdir(self.home_dir)
+        os.setsid()
+        os.umask(self.umask)
+
+        try:
+            pid = os.fork()
+            if pid > 0:
+                sys.exit(0)
+        except OSError as e:
+            sys.stderr.write('fork #2 failed: %d (%s)\n' % (e.errno, e.strerror))
+            sys.exit(1)
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        si = open(self.stdin, 'r')
+        so = open(self.stdout, 'a+')
+        if self.stderr:
+            se = open(self.stderr, 'a+', 0)
+        else:
+            se = so
+
+        os.dup2(si.fileno(), sys.stdin.fileno())
+        os.dup2(so.fileno(), sys.stdout.fileno())
+        os.dup2(se.fileno(), sys.stderr.fileno())
+
+        def sig_handler(signum, frame):
+            self.daemon_alive = False
+
+        signal.signal(signal.SIGTERM, sig_handler)
+        signal.signal(signal.SIGINT, sig_handler)
+
+        if self.verbose >= 1:
+            print('daemon process started ...')
+
+        atexit.register(self.del_pid)
+        pid = str(os.getpid())
+        open(self.pidfile, 'w+').write('%s\n' % pid)
+
+    def get_pid(self):
+        try:
+            pf = open(self.pidfile, 'r')
+            pid = int(pf.read().strip())
+            pf.close()
+        except IOError:
+            pid = None
+        except SystemExit:
+            pid = None
+        return pid
+
+    def del_pid(self):
+        if os.path.exists(self.pidfile):
+            os.remove(self.pidfile)
+
+    def start(self, *args, **kwargs):
+        if self.verbose >= 1:
+            print('ready to starting ......')
+        # check for a pid file to see if the daemon already runs
+        pid = self.get_pid()
+        if pid:
+            msg = 'pid file %s already exists, is it already running?\n'
+            sys.stderr.write(msg % self.pidfile)
+            sys.exit(1)
+        # start the daemon
+        self.daemonize()
+        self.run(*args, **kwargs)
+
+    def status(self):
+        try:
+            shell_status = '''
+                  ps aux|grep -v grep|grep -i python|grep -w 'cli daemon'|awk '{print $2}'
+                  '''
+            _pid = ZbxCommand(shell_status, is_log=False).run()
+            try:
+                pid = re.split(r'\n|\r', _pid.strip())
+                if len(pid) > 1:
+                    print('cli is running')
+                else:
+                    print('cli is not running')
+            except Exception as e:
+                pass
+        except Exception as er:
+            pass
+
+    def stop(self):
+        if self.verbose >= 1:
+            print('stopping ...')
+        pid = self.get_pid()
+        cmd = '''
+        ps  aux|grep -v grep|grep -v -w '%s'|grep -i python|grep -w 'cli daemon'|awk '{print $2}'|xargs -n 1 kill -9
+        ''' % (os.getpid())
+        ZbxCommand(cmd, is_log='1').run()
+        if not pid:
+            msg = 'pid file [%s] does not exist. Not running?\n' % self.pidfile
+            sys.stderr.write(msg)
+            if os.path.exists(self.pidfile):
+                os.remove(self.pidfile)
+            return
+        # try to kill the daemon process
+        try:
+            i = 0
+            while 1:
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.1)
+                i = i + 1
+                if i % 10 == 0:
+                    os.kill(pid, signal.SIGHUP)
+        except OSError as err:
+            err = str(err)
+            if err.find('No such process') > 0:
+                if os.path.exists(self.pidfile):
+                    os.remove(self.pidfile)
+            else:
+                print(str(err))
+                sys.exit(1)
+            if self.verbose >= 1:
+                print('Stopped!')
+
+    def restart(self, *args, **kwargs):
+        self.stop()
+        self.start(*args, **kwargs)
+
+    def is_running(self):
+        pid = self.get_pid()
+        # print(pid)
+        return pid and os.path.exists('/proc/%d' % pid)
+
+    def run(self, *args, **kwargs):
+        pass
+
+
+class ZbxCommand(object):
+    def __init__(self, cmd, is_log='0', task_id=''):
+        mc = re.match('^su\s+[\'"a-zA-z09]+?\s+\-c', cmd)
+        if PLATFORM == 'windows' and mc != None:
+            cmd = cmd.replace(mc.group(0), '')
+            cmd = cmd.strip()
+            cmd = re.sub('^\"|\"$', '', cmd)
+        self.cmd = cmd
+        self.process = None
+        self.is_log = is_log
+        self.return_code = -1
+        self.util = ZbxCommon()
+        self.messge_success = ''
+        self.message_error = ''
+        self.result_lines = []
+        self.task_id = task_id
+        if task_id == '':
+            self.uuid = str(datetime.datetime.now()).replace(' ', '').replace(':', '').replace('-', '').replace('.', '')
+        else:
+            self.uuid = task_id + '_' + str(random.randint(0, 10)) + '.log'
+        # self.uuid_error=self.uuid+'_error'
+        self.fn = tempfile.gettempdir() + os.path.sep + self.uuid
+        self.result = open(self.fn, 'a+')
+        # self.result_error=open(tempfile.gettempdir()+ os.path.sep +self.uuid_error,'a+')
+
+    def clean_log(self, task_id=''):
+        try:
+            if task_id == '':
+                task_id = self.uuid
+            tmpname = tempfile.gettempdir() + os.path.sep + task_id
+            if os.path.exists(tmpname):
+                with open(tmpname, 'r') as tf:
+                    logger.info(tf.read())
+                os.unlink(tmpname)
+        except Exception as er:
+            logger.error(er)
+
+    def run(self, timeout=30, task_id='', url_success='', url_error='', url='', ip='', kw=None, env=None):
+
+        if len(re.findall(r'\s*cli\s+shell\s+', self.cmd)) > 0:
+            result, exit_code = cli._shell(self.cmd, self.task_id, kw)
+            self.return_code = exit_code
+            return result
+        if len(re.findall(r'\s*cli\s+(localshell|lshell)\s+', self.cmd)) > 0:
+            result, exit_code = cli._localshell(self.cmd, self.task_id, kw)
+            self.return_code = exit_code
+            return result
+
+        def feedback(url, result, task_id, return_code=0, ip=''):
+            try:
+                if task_id == '':
+                    return
+                machine_id = self.util.get_product_uuid()
+                try:
+                    if isinstance(result, bytes):
+                        result = result.decode('utf-8', 'ignore')
+                except Exception as er:
+                    pass
+                if ip == '':
+                    ip = self.util.get_one_ip()
+                extra = ''
+                batch_id = ''
+                if kw != None and isinstance(kw, dict):
+                    extra = kw.get('extra', '')
+                    batch_id = kw.get('batch_id', '')
+                data = self.util.url_fetch_witherr(url, {'cmd': self.cmd, 'machine_id': machine_id, 'result': result,
+                                                         'task_id': task_id, 'extra': extra, 'batch_id': batch_id,
+                                                         'success': self.messge_success, 'error': self.message_error,
+                                                         'return_code': return_code, 'ip': machine_id,
+                                                         's': self.util.get_hostname(), 'i': ip}, timeout=8)
+                print(data)
+                if PY2:
+                    if isinstance(data, str):
+                        logger.info('feedback result:%s' + str(data))
+                    if isinstance(data, unicode):
+                        logger.info('feedback result:%s' + str(data.encode('utf-8', 'ignore')))
+                if PY3:
+                    if isinstance(data, str):
+                        logger.info('feedback result:%s' + str(data))
+            except Exception as er:
+                data = {'task_id': task_id, 'result': result, 'url': url}
+                logger.error('feedback error:\t' + str(er) + json.dumps(data))
+
+        def target():
+            if self.is_log == '1':
+                logger.info("task_id:%s" % (task_id) + "\t" + str(self.cmd))
+            elif self.is_log == '2':
+                logger.info("task_id:%s" % (task_id) + "\t cmd:mask")
+
+            self.process = subprocess.Popen(self.cmd, shell=True, stdout=self.result, stderr=self.result, env=env)
+            if task_id != "":
+                PROCESS[task_id] = self.process
+            self.process.communicate()
+            self.process.poll()
+            self.return_code = self.process.returncode
+            if self.return_code == None:
+                self.return_code = -1
+
+        thread = threading.Thread(target=target)
+        thread.start()
+        st = time.time()
+        bt = time.time()
+        pos = 0
+
+        def read_content(fn, start, end):
+            with open(fn) as f:
+                f.seek(start, 0)
+                content = f.read(end - start)
+                return content
+
+        while True:
+            if self.process == None:
+                time.sleep(0.2)
+            elif self.process.poll() == None:
+                time.sleep(0.2)
+            if self.process != None and self.process.poll() != None:
+                break
+            if timeout > 0 and time.time() - bt > timeout:
+                break
+            if time.time() - st > 1:
+                st = time.time()
+                fsize = os.path.getsize(self.fn)
+                if fsize <= pos:
+                    continue
+                content = read_content(self.fn, pos, fsize)
+                pos = fsize
+                self.result_lines = []
+                if url == '' and kw != None and 'url' in kw:
+                    url = kw['url']
+                if url != '':
+                    feedback(url, content, task_id, -2, ip)
+                else:
+                    feedback(server_url + "/%s/%s" % (default_module, "feedback_result2"), content, task_id, -2, ip)
+                time.sleep(0.2)
+        content = read_content(self.fn, pos, os.path.getsize(self.fn))
+        if len(content) > 0:
+            if url != '':
+                feedback(url, content, task_id, -2, ip)
+            else:
+                feedback(server_url + "/%s/%s" % (default_module, "feedback_result2"), content, task_id, -2, ip)
+            time.sleep(0.2)
+        if timeout == -1 and self.process.poll() == None:
+            thread.join()
+        thread.join(timeout)
+
+        def get_result():
+            result = ''
+            error = ''
+            try:
+                result = open(tempfile.gettempdir() + os.path.sep + self.uuid, 'r').read()
+                if self.is_log == '1':
+                    logger.info("task_id:%s\tSuccess Result:" % (task_id) + str(result))
+                elif self.is_log == '2':
+                    logger.info("task_id:%s\tSuccess Result:mask" % (task_id))
+                elif self.is_log == '3':
+                    logger.info("task_id:%s\tSuccess Result:" % (task_id) + str(result))
+            except Exception as er:
+                print(self.cmd)
+                print('get_result:\t' + str(er))
+                logger.error(er)
+            finally:
+                try:
+                    if not self.result.closed:
+                        self.result.close()
+                        if self.task_id in PROCESS.keys():
+                            del PROCESS[task_id]
+                    os.unlink(tempfile.gettempdir() + os.path.sep + self.uuid)
+                except Exception as er:
+                    print('get_result:\t' + str(er))
+                    logger.error(er)
+                    pass
+            # try:
+            #     error = open(tempfile.gettempdir() + os.path.sep + self.uuid_error, 'r').read()
+            # except Exception as err:
+            #     logger.error(er)
+            #     print(err)
+            #     if self.is_log == '1' or self.is_log == '2' or self.is_log == '3':
+            #         logger.error("task_id:%s\tException Result:" % (task_id) + str(error))
+            # finally:
+            #     try:
+            #         self.result_error.close()
+            #         os.unlink(tempfile.gettempdir() + os.path.sep + self.uuid_error)
+            #     except Exception as er:
+            #         print('get_result close :\t' + str(er))
+            #         logger.error(er)
+
+            try:
+                if PLATFORM == 'windows':
+                    result = result.decode('gbk').encode('utf-8', 'ignore')
+                    error = error.decode('gbk').encode('utf-8', 'ignore')
+            except Exception as er:
+                pass
+            return result.strip(), error.strip()
+
+        if thread.is_alive():
+            logger.warn(self.cmd)
+            result, error = get_result()
+            if url != '':
+                feedback(url, result, task_id, self.return_code, ip)
+            if url_error != '':
+                feedback(url_error, "(error)timeout\n%s" % (str(result) + str(error)), task_id, -1, ip)
+                if self.is_log == '1' or self.is_log == '2' or self.is_log == '3':
+                    logger.info("task_id:%s\ttimeout result has feedback to url:%s result:%s error:%s" % (
+                        task_id, url_error, result, error))
+            else:
+                logger.info('timeout task_id:%s' % (task_id))
+            try:
+                self.process.terminate()
+            except Exception as er:
+                print(er)
+            if result != '':
+                return "(error)timeout \nresult:%s error:%s" % (str(result), str(error))
+                # return result
+            return "(error)timeout \nresult:%s error:%s" % (str(result), str(error))
+            # util.url_fetch(server_url+'/slowlog',{'param':{ 'cmd':self.cmd,'ip':util.get_one_ip()}})
+        result, error = get_result()
+        try:
+            if re.findall(r'\(error\)\s+file\s+not\s+found', result):
+                self.return_code = 127
+        except Exception as er:
+            pass
+
+        self.messge_success = result
+        self.message_error = error
+
+        if result == '' and error != '':
+            result = 'finish'
+        if url != '':
+            feedback(url, result, task_id, self.return_code, ip)
+            if self.is_log == '1' or self.is_log == '2' or self.is_log == '3':
+                logger.info("task_id:%s\t result has feedback to url:%s " % (task_id, url))
+        if self.return_code == 0 and url_success != '':
+            feedback(url_success, result, task_id, self.return_code, ip)
+            if self.is_log == '1' or self.is_log == '2' or self.is_log == '3':
+                logger.info("task_id:%s\tsuccess result has feedback to url:%s " % (task_id, url_success))
+        if self.return_code != 0 and url_error != '':
+            feedback(url_error, result, task_id, self.return_code, ip)
+            if self.is_log == '1' or self.is_log == '2' or self.is_log == '3':
+                logger.info("task_id:%s\terror result has feedback to url:%s " % (task_id, url_error))
+        if error.strip() != '':
+            return result + "\n" + error
+        else:
+            return result
+
+
+class ZbxDaemonWin(object):
+
+    def __init__(self, daemon=None):
+        bflag = False
+        self.daemon = daemon
+
+    def action(self, action='daemon'):
+        try:
+            import win32serviceutil
+            import win32event
+            import win32service
+        except Exception as er:
+            print('please instll pywin32,  pip install pywin32')
+            ZbxCommand('pip install pywin32').run(timeout=600)
+            sys.exit(0)
+
+        class Daemon(win32serviceutil.ServiceFramework):
+            _svc_name_ = "Cli Service"
+            _svc_display_name_ = "Cli Service"
+
+            def __init__(self, args, daemon=None):
+                # win32serviceutil.ServiceFramework.__init__(self, args)
+                self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+                self.daemon = daemon
+
+            def SvcStop(self):
+                self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+                win32event.SetEvent(self.hWaitStop)
+
+            def SvcDoRun(self):
+                self.daemon.run()
+                win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
+
+        action = ''
+        daemon = Daemon({}, daemon=self.daemon)
+        for i in ['start', 'install']:
+            if sys.argv.count(i) > 0:
+                sys.argv.remove(i)
+                action = i
+                break
+        # print(action)
+        sys.argv.remove('-s')
+        sys.argv.remove('daemon')
+        if action == 'start':
+            sys.argv.append('install')
+            win32serviceutil.HandleCommandLine(Daemon)
+            sys.argv.remove('install')
+        sys.argv.append(action)
+        win32serviceutil.HandleCommandLine(Daemon)
+
+
+class ZbxCommon(object):
+    def __init__(self):
+        self.machine_id = ''
+        self.config = {}
+
+    def urlencode(self, str):
+        reprStr = repr(str).replace(r'\x', '%')
+        return reprStr[1:-1]
+
+    def get_basic_auth(self, user='', pwd=''):
+        s = user.strip() + ':' + pwd.strip()
+        if PY2:
+            return 'Basic ' + base64.encodestring(s).strip()
+        if PY3:
+            if hasattr(base64, 'encodestring'):
+                return 'Basic ' + str(base64.encodestring(s.encode('utf-8')), 'utf-8').strip()
+            else:
+                return 'Basic ' + str(base64.encodebytes(s.encode('utf-8')), 'utf-8').strip()
+
+    def is_private_ip(self, ip):
+        import struct
+        ip1 = 167772160
+        ip2 = 2886729728
+        ip3 = 3232235520
+        if ip == '127.0.0.1':
+            return True
+        binaryIp = socket.inet_aton(ip)
+        numIp = struct.unpack('!L', binaryIp)[0]
+        mark = 2 ** 32 - 1
+        tag = (mark << 16) & numIp
+        if ip3 == tag:
+            return True
+        tag = mark << 20 & numIp
+        if ip2 == tag:
+            return True
+        tag = (mark << 24) & numIp
+        if ip1 == tag:
+            return True
+        return False
+
+    def clean_log(self, task_id):
+        try:
+            tmpname = tempfile.gettempdir() + os.path.sep + task_id
+            if os.path.exists(tmpname):
+                with open(tmpname, 'r') as tf:
+                    logger.info(tf.read())
+                os.unlink(tmpname)
+        except Exception as er:
+            logger.error(er)
+
+    def split(self, s, sep, trim_null=True):
+        ret = re.split(re.compile(sep, re.MULTILINE | re.IGNORECASE), s)
+        rets = []
+        if trim_null:
+            for i in ret:
+                if str(i).strip() == '':
+                    continue
+                else:
+                    rets.append(i)
+        else:
+            return ret
+        return rets
+
+    def match(self, s, m, o='ima'):
+        flags = 0
+        is_all = False
+        for i in range(0, len(o)):
+            if o[i] == 'i':
+                flags = flags | re.IGNORECASE
+            if o[i] == 'm':
+                flags = flags | re.MULTILINE
+            if o[i] == 'a':
+                is_all = True
+        r = re.compile(m, flags=flags)
+        ret = r.findall(s)
+        if is_all:
+            return json.dumps(ret)
+        if len(ret) > 0:
+            return ret[0]
+        else:
+            return ''
+
+    def color(self, message, color='green'):
+        swtich = {
+            "black": lambda x: "\033[30m%s\033[0m" % (x),
+            "red": lambda x: "\033[31m%s\033[0m" % (x),
+            "green": lambda x: "\033[32m%s\033[0m" % (x),
+            "yello": lambda x: "\033[33m%s\033[0m" % (x),
+            "blue": lambda x: "\033[34m%s\033[0m" % (x),
+            "purple": lambda x: "\033[35m%s\033[0m" % (x),
+            "white": lambda x: "\033[37m%s\033[0m" % (x),
+            "glint": lambda x: "\033[5;31m%s\033[0m" % (x),
+
+        }
+        try:
+            return swtich[color](message)
+        except KeyError as e:
+            return message
+
+    def download(self, filename, directory, filepath):
+        try:
+            data = {'file': filename, 'dir': directory}
+            data = urllib.urlencode(data)
+            if filename.startswith('http://') or filename.startswith('https://'):
+                http_url = filename
+                if http_url.endswith('/'):
+                    http_url = http_url[0:len(http_url) - 1]
+                if http_url.rindex('/') > 0 and http_url.rindex('/') < len(http_url):
+                    filename = http_url[http_url.rindex('/') + 1:]
+                filename = filename.replace('?', '')
+                filepath = filename
+            else:
+                http_url = '%s/%s/download?%s' % (server_url, default_module, data)
+
+            def _download(url, data, filepath):
+                # request = urllib2.Request(url)
+                # request.add_header('User-Agent', 'CLI(1.0)')
+                # if filename.startswith('http://') or filename.startswith('https://'):
+                #     request.add_header('auth-uuid', self._get_config('auth-uuid'))
+                # conn = urllib2.urlopen(request)
+                try:
+                    content = cli.util.http_request(url, data=data, timeout=600, is_binary=True)
+                except Exception as er:
+                    logger.error(er)
+                if len(content) < 256 and str(content).strip().startswith('(error) file'):
+                    print(content)
+                    sys.exit(1)
+
+                f = open(filepath, 'wb')
+                f.write(content)
+                f.close()
+
+            _download(http_url, data, filepath)
+            try:
+                line = ''
+                with open(filepath, 'r') as _file:
+                    if PY3:
+                        try:
+                            _file.readline().encode()
+                        except Exception as er:
+                            pass
+                    else:
+                        line = str(_file.readline()).strip()
+                if line.startswith('redirect:http://') or line.startswith('redirect:https://'):
+                    _download(line, data, filepath)
+            except Exception as er:
+                print('(error) %s' % (str(er)))
+                logger.error(er)
+        except Exception as e:
+            logger.error(e)
+            print('(error) %s' % (str(e)))
+            sys.exit(1)
+
+    def upload(self, url, filepath, directory, ip='', o='text', t='60', user="root"):
+        boundary = '----------%s' % hex(int(time.time() * 1000))
+        data = []
+        data.append('--%s' % boundary)
+        fr = open(filepath, 'rb')
+        filename = os.path.basename(filepath)
+        data.append('Content-Disposition: form-data; name="%s"\r\n' % 'filename')
+        data.append(filename)
+        data.append('--%s' % boundary)
+        data.append('Content-Disposition: form-data; name="%s"\r\n' % 'dir')
+        data.append(directory)
+        data.append('--%s' % boundary)
+        data.append('Content-Disposition: form-data; name="%s"\r\n' % 'ip')
+        data.append(ip)
+        data.append('--%s' % boundary)
+        data.append('Content-Disposition: form-data; name="%s"\r\n' % 'o')
+        data.append(o)
+        data.append('--%s' % boundary)
+        data.append('Content-Disposition: form-data; name="%s"\r\n' % 't')
+        data.append(t)
+        data.append('--%s' % boundary)
+        data.append('Content-Disposition: form-data; name="%s"\r\n' % 'user')
+        data.append(user)
+        data.append('--%s' % boundary)
+        data.append('Content-Disposition: form-data; name="%s"; filename="%s"' % ('file', filename))
+        data.append('Content-Type: %s\r\n' % 'image/png')
+
+        if PY3:
+            http_body = "\r\n".join(data) + '\r\n'
+            from io import BytesIO
+            f = BytesIO()
+            f.write(http_body.encode(encoding="utf-8"))
+            f.write(fr.read())
+            f.write(('\r\n--%s--\r\n' % boundary).encode(encoding="utf-8"))
+        else:
+            data.append(fr.read())
+            data.append('--%s--\r\n' % boundary)
+            http_body = '\r\n'.join(data)
+        fr.close()
+
+        try:
+            if PY3:
+                req = urllib2.Request(url, data=f.getvalue())
+            else:
+                req = urllib2.Request(url, data=http_body)
+            # req.add_header('Content-Type', 'multipart/form-data; boundary=%s' % boundary)
+            # req.add_header('User-Agent','Mozilla/5.0')
+            # req.add_header('Referer','http://remotserver.com/')
+            # req.add_header('auth-uuid',self._get_config('auth-uuid'))
+            # resp = urllib2.urlopen(req, timeout=5)
+            # qrcont=resp.read()
+            # print(qrcont.decode())
+            header = cli.util.gen_header()
+            header['Content-Type'] = 'multipart/form-data; boundary=%s' % boundary
+            qrcont = ''
+            if PY3:
+                qrcont = cli.util.http_request(url, f.getvalue(), header=header, timeout=600)
+            else:
+                qrcont = cli.util.http_request(url, http_body, header=header, timeout=600)
+            print(qrcont.decode())
+
+        except Exception as e:
+            logger.error(str(e))
+            print('(error)%s' % (str(e)))
+
+    def url_fetch_witherr(self, url, data=None, header={}, timeout=30, httpCmd=''):
+        return self._url_fetch(url, data=data, header=header, timeout=timeout, httpCmd=httpCmd)
+
+    def url_fetch(self, url, data=None, header={}, timeout=30, httpCmd='', debug=False):
+        try:
+            return self._url_fetch(url, data=data, header=header, timeout=timeout, httpCmd=httpCmd, debug=debug)
+        except Exception as er:
+            # logger.error('url_fetch error:%s'+str(er))
+            # print(er)
+            return ''
+
+    def _get_config(self, key):
+        home = os.path.expanduser('~')
+        fn = home + '/.cli'
+        content = ''
+        data = {}
+        try:
+            if os.path.isfile(fn):
+                with open(fn) as f:
+                    content = f.read()
+                    content = str(content).strip()
+                lines = re.split(r'\n', content)
+                for line in lines:
+                    line = str(line).strip()
+                    pos = line.find('=')
+                    if pos > 0:
+                        data[line[0:pos]] = line[pos + 1:]
+                if len(data) > 0:
+                    self.config = data
+        except Exception as er:
+            logger.error(er)
+        if key in self.config.keys():
+            return self.config[key]
+        else:
+            return ''
+
+    def _set_config(self, key, value):
+        home = os.path.expanduser('~')
+        fn = home + '/.cli'
+        kv = []
+        ks = ['token', 'auth-uuid']
+        for _k in ks:
+            if not _k in self.config.keys():
+                self.config[_k] = ''
+        self.config[key] = value
+        for k, v in self.config.items():
+            kv.append('%s=%s' % (k, v))
+        try:
+            if os.path.isfile(fn):
+                with open(fn, 'w') as f:
+                    f.write("\n".join(kv))
+                return True
+            else:
+                try:
+                    with open(fn, 'w') as f:
+                        f.write("\n".join(kv))
+                except Exception as e:
+                    logger.error(e)
+        except Exception as er:
+            logger.error(er)
+            return False
+
+    def http_request(self, url, data=None, header={}, timeout=30, method='POST', debug=False, is_binary=False):
+        headers = self.gen_header()
+        if len(header) > 0:
+            for k, v in header.items():
+                headers[k] = v
+        if data != None and isinstance(data, dict):
+            data = urllib.urlencode(data)
+            if PY3:
+                data = data.encode('utf-8', 'ignore')
+
+        conn = None
+        handle = None
+        try:
+            urlinfo = urlparse(url)
+
+            if urlinfo[0] == 'https':
+                if PLATFORM == 'windows':
+                    ssl._create_default_https_context = ssl._create_unverified_context
+                conn = httplib.HTTPSConnection(host=urlinfo[1], timeout=timeout)
+            else:
+                conn = httplib.HTTPConnection(host=urlinfo[1], timeout=timeout)
+            # global  global_debug
+            if global_debug:
+                conn.set_debuglevel(1)
+            if not 'Content-Type' in headers:
+                headers['Content-Type'] = 'application/x-www-form-urlencoded'
+            headers['Host'] = urlinfo[1]
+            uri = urlinfo[2]
+            if urlinfo[4] != '':
+                uri = uri + '?' + urlinfo[4]
+            if debug:
+                if len(data) < 2048:
+                    print(method, url, headers, data)
+                else:
+                    print(method, url, headers)
+            for k, v in header.items():
+                headers[k] = str(v).strip()
+            conn.request(method, url=uri, body=data, headers=headers)
+            handle = conn.getresponse()
+
+            html = handle.read()
+            if handle.status != 200:
+                try:
+                    if len(str(html)) > 4096:
+                        logger.warning('http_request status:%s reason:%s' % (str(handle.status), handle.reason))
+                    else:
+                        logger.warning('http_request status:%s reason:%s content:%s' % (
+                            str(handle.status), handle.reason, str(html)))
+                except Exception as er:
+                    pass
+            if is_binary:
+                return html
+            cm = r'<meta[^>]*charset=[\'\"]*?([a-z0-8\-]+)[\'\"]?[^>]*?>'
+            if PY3:
+                cm = cm.encode('utf-8', 'ignore')
+            charset = re.compile(cm, re.IGNORECASE).findall(html)
+            if len(charset) > 0:
+                if charset[0] == 'gb2312':
+                    charset[0] = 'gbk'
+                if PY2:
+                    html = unicode(html, charset[0])
+            if PY3:
+                return html.decode('utf-8', 'ignore')
+            return html
+        except Exception as er:
+            if debug or global_debug:
+                logger.error(er)
+            if global_debug:
+                print(url, er)
+            raise Exception(er)
+        finally:
+            try:
+                if handle != None and handle.fp != None:
+                    handle.close()
+                if conn != None:
+                    conn.close()
+            except Exception as er:
+                pass
+
+    def gen_header(self):
+        machine_id = self.get_product_uuid()
+        key = self._get_config('auth-uuid')
+        headers = {
+            'User-Agent': 'CLI agent(1.0)',
+            'auth-uuid': key.strip(),
+            'token': self._get_config('token'),
+            'machine-id': machine_id.strip(),
+        }
+        return headers
+
+    def _url_fetch(self, url, data=None, header={}, timeout=30, httpCmd='', debug=False):
+        if httpCmd == '':
+            if data == None:
+                httpCmd = 'GET'
+            else:
+                httpCmd = 'POST'
+        return self.http_request(url, data=data, header=header, timeout=timeout, method=httpCmd)
+
+        #
+        # html=''
+        # handle=None
+        # machine_id=self.get_product_uuid()
+        # key= self._get_config('auth-uuid')
+        # try:
+        #     headers = self.gen_header()
+        #     if len(header)>0:
+        #         for k,v in header.items():
+        #             headers[k]=v
+        #     if data!=None:
+        #         data=urllib.urlencode(data)
+        #         if PY3:
+        #             data=data.encode('utf-8','ignore')
+        #         # print(data)
+        #
+        #
+        #
+        #     # handle = urllib2.urlopen(req, timeout=timeout)
+        #
+        #     urlinfo=urlparse(url)
+        #
+        #     handle=None
+        #     conn=None
+        #     if urlinfo[0]=='https' and PLATFORM=='windows':
+        #         try:
+        #             ssl._create_default_https_context = ssl._create_unverified_context
+        #             conn=httplib.HTTPSConnection(host=urlinfo[1],timeout=timeout)
+        #             if httpCmd=='':
+        #                 if data==None:
+        #                     httpCmd="GET"
+        #                 else:
+        #                     httpCmd="POST"
+        #             if not 'Content-type' in headers:
+        #                 headers['Content-type']='application/x-www-form-urlencoded'
+        #             conn.request(httpCmd,url=url,body=data,headers=headers)
+        #             handle=conn.getresponse()
+        #             if not handle.status  in [200,301,302]:
+        #                 raise Exception(handle.status)
+        #         except Exception as er:
+        #             raise  Exception(er)
+        #     else:
+        #         req = urllib2.Request(
+        #             url=url,
+        #             headers=headers,
+        #             data=data
+        #         )
+        #
+        #         if httpCmd != "":
+        #             req.get_method = lambda: httpCmd
+        #         handle = urllib2.urlopen(req, timeout=timeout)
+        #
+        #
+        #
+        #
+        #
+        #     html=handle.read()
+        #
+        #     cm=r'<meta[^>]*charset=[\'\"]*?([a-z0-8\-]+)[\'\"]?[^>]*?>'
+        #     if PY3:
+        #         cm=cm.encode('utf-8','ignore')
+        #     charset=re.compile(cm,re.IGNORECASE).findall(html)
+        #     if len(charset) >0:
+        #         if charset[0]=='gb2312':
+        #             charset[0]='gbk'
+        #         if PY2:
+        #             html=unicode(html,charset[0])
+        #     if PY3:
+        #         return html.decode('utf-8','ignore')
+        # except Exception as e:
+        #     raise Exception(e)
+        # finally:
+        #     if handle!=None and handle.fp!=None:
+        #         try:
+        #             handle.fp.close()
+        #             if conn!=None:
+        #                 conn.close()
+        #         except Exception as er:
+        #             pass
+        #
+        # return html
+
+    def cmdline_args(self, s):
+        import re
+        s = re.subn(r'\\"', '{,,}', s)[0]
+        s = re.subn(r"\\'", '{,}', s)[0]
+        l = re.findall(r"'[^']+?'|\"[^\"]*?\"", s, re.IGNORECASE | re.MULTILINE)
+        # l= re.findall(r"'[\s\S]*[\']?'|\"[\s\S]*[\"]?\"",s,re.IGNORECASE|re.MULTILINE)
+        for i, v in enumerate(l):
+            s = s.replace(v, '{' + str(i) + '}')
+        p = re.split(r'\s+', s)
+        ret = []
+
+        def repl(a):
+            i = re.findall(r'\{\d+\}', a.group(0))
+            # a = re.sub('\{\d+\}', l[int(re.sub(r'^{|}$', '', i[0]))], a.group(0))
+            s = a.group(0)
+            for ii in i:
+                s = s.replace(ii, l[int(re.sub(r'^{|}$', '', ii))])
+                # a = re.sub('\{\d+\}', l[int(re.sub(r'^{|}$', '', ii))], a.group(0))
+            return s
+
+        for a in p:
+            # print a
+            i = re.findall(r'\{\d+\}', a)
+            if len(i) > 0:
+                a = re.sub(r'[\s\S]+', repl, a)
+            if re.match(r"'[\s\S]+'", a) or re.match(r'"[\s\S]+"', a):
+                a = re.sub("^'|'$|^\"|\"$", '', a)
+            a = re.subn(r"\{\,\,\}", '\"', a)[0]
+            a = re.subn(r"\{\,\}", "\'", a)[0]
+            ret.append(a)
+        return ret
+
+    # def cmdline_args(self,s):
+    #     import re
+    #     l= re.findall(r"'[\s\S]*[\']?'|\"[\s\S]*[\"]?\"",s,re.IGNORECASE|re.MULTILINE)
+    #     for i,v in enumerate(l):
+    #         s=s.replace(v,'{'+str(i)+'}')
+    #     p=re.split(r'\s+',s)
+    #     ret=[]
+    #     for a in p:
+    #         if re.match(r'\{\d+\}',a):
+    #             a=l[int(re.sub(r'^{|}$','',a))]
+    #         ret.append(a)
+    #     return ret
+
+    def getopt(self, inputs):
+        def ptype(input):
+            if input == "":
+                return (0, "")
+            if "-" == input[0] and len(input) == 2:
+                return (1, input[1])
+            if "--" == input[:2] and len(input) >= 4:
+                return (2, input[2:])
+            return (0, "")
+
+        def istype(input):
+            if len(input) <= 0:
+                return 0
+            if "-" == input[0]:
+                return 1
+            return 0
+
+        ret = {}
+        ret['__ctrl__'] = ''
+        ret['__func__'] = ''
+        u = 0
+        ucount = len(inputs)
+        icount = 0
+        ls = []
+        if ucount >= 1:
+            while 1:
+                if u >= ucount:
+                    break
+                if istype(inputs[u]) == 1:
+                    break
+
+                ls.append(inputs[u])
+                u += 1
+
+            inputs = inputs[u:]
+            icount = len(inputs)
+
+        if icount >= 1:
+            i = 0
+            state = 0
+            while 1:
+                t, name = ptype(inputs[i])
+                for c in range(1):
+                    if t == 0:
+                        i += 1
+                        break
+                    if i + 1 < icount:
+                        tt, tname = ptype(inputs[i + 1])
+                        if tt != 0:
+                            ret[name] = ""
+                            i += 1
+                            break
+                        ret[name] = inputs[i + 1]
+                        i += 2
+                        break
+                    ret[name] = ""
+                    i += 1
+                    break
+                if i >= icount:
+                    break
+        if len(ls) == 2:
+            ret['__ctrl__'] = ls[0]
+            ret['__func__'] = ls[1]
+        elif len(ls) == 1:
+            ret['__ctrl__'] = ''
+            ret['__func__'] = ls[0]
+        return (ret)
+
+    def parse_argv(self, argv):
+        data = {}
+        long_args = []
+        short_args = []
+        for v in argv:
+            if v.startswith('--'):
+                long_args.append(v.replace('--', '') + "=")
+            elif v.startswith('-'):
+                short_args.append(v.replace('-', ''))
+        opts = getopt.getopt(argv, ":".join(short_args) + ":", long_args)
+        for opt in opts[0]:
+            data[opt[0].replace('-', '')] = opt[1]
+        if len(data) > 0:
+            return data
+        else:
+            return argv
+
+    def md5(self, src):
+        m2 = hashlib.md5()
+        if PY3:
+            src = str(src).encode('utf-8', 'ignore')
+        m2.update(src)
+        return m2.hexdigest()
+
+    def now_datetime(self):
+        now_datetime = time.strftime('_%Y-%m-%d_%H_%M_%S', time.localtime(time.time()))
+        return now_datetime
+
+    def execute(self, cmd, timeout=30):
+        try:
+            return ZbxCommand(cmd).run(timeout=timeout)
+            # return os.popen(cmd).read()
+        except Exception as err:
+            logger.error(err)
+            return ""
+
+    def get_all_ip_list(self):
+        if platform.system().lower() == 'windows':
+            name, xx, ips = socket.gethostbyname_ex(socket.gethostname())
+            return ips
+        else:
+            # cmdline = "ip a | egrep \"^\s*inet.*\" | grep -v inet6 | awk '{print $2}' | awk -v FS='/' '{print $1}'"
+            cmdline = "ip a"
+            ret = self.execute(cmdline)
+            ips = re.findall(r'inet\s*(\d+\.\d+\.\d+\.\d+)', ret)
+            if len(ips) == 0:
+                return [self.get_host_ip()]
+            else:
+                return ips
+            # lip=re.split(r'\n',ret)
+            # ips=[]
+            # for ip in lip:
+            #     if str(ip).strip ()!='':
+            #       ips.append(ip.strip())
+            # return ips
+
+    def get_uuid(self):
+        return str(uuid.uuid4())
+
+    def get_host_ip(self):
+        ip = '127.0.0.1'
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(2)
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+        except Exception as er:
+            logger.error(er)
+        finally:
+            try:
+                if s != None:
+                    s.close()
+            except Exception as er:
+                pass
+        return ip
+
+    def get_one_ip(self):
+        ips = self.get_all_ip_list()
+        ips.sort()
+        ret = [x for x in ips if x.startswith('10.') or x.startswith('172.') or x.startswith('192.')]
+        if len(ret) > 1:
+            return ret[0]
+        return ''.join(ret)
+
+    def get_product_uuid(self):
+        if self.machine_id != '' and len(self.machine_id) == 36:
+            return self.machine_id.strip()
+        product_uuid = ''
+        # if os.path.isfile('/sys/devices/virtual/dmi/id/product_uuid'):
+        #     product_uuid=self.execute('cat /sys/devices/virtual/dmi/id/product_uuid').strip()
+        if product_uuid == "":
+            try:
+                uuid_file = '/etc/machine_id'
+                if not os.path.exists(uuid_file):
+                    product_uuid = self.get_uuid()
+                    with open(uuid_file, 'w') as file:
+                        file.write(product_uuid)
+                else:
+                    with open(uuid_file, 'r') as file:
+                        product_uuid = file.read()
+                        product_uuid = product_uuid.strip()
+                self.machine_id = product_uuid
+            except Exception as er:
+                print(er)
+        return self.machine_id
+
+    def get_hostname(self):
+        os_name = os.name
+        host_name = ""
+        try:
+            if os_name == 'nt':
+                host_name = os.getenv('computername')
+            elif os_name == 'posix':
+                host = os.popen('hostname')
+                try:
+                    host_name = host.read().strip()
+                except:
+                    host_name = ''
+                finally:
+                    host.close()
+            if host_name.strip() == '':
+                host_name = socket.gethostbyname()
+        except Exception as er:
+            logger.error(er)
+            return ""
+        return host_name.strip()
+
+    def exec_filename(self):
+        path = os.path.realpath(sys.path[0])
+        if os.path.isfile(path):
+            path = os.path.dirname(path)
+            return os.path.abspath(path) + os.path.sep + __file__
+        else:
+            caller_file = inspect.stack()[1][1]
+            return os.path.abspath(os.path.dirname(caller_file)) + os.path.sep + __file__
+
+    def tuple2list(self, *args):
+        print(args)
+        l = []
+        for i in args:
+            l.append(i)
+        return l
+
+    def get_envs(self):
+        envs = {}
+        for name in os.environ:
+            envs[name] = os.environ[name]
+        return envs
+
+    def command_args(self, args):
+        if isinstance(args, list) or isinstance(args, tuple):
+            return '"%s"' % '" "'.join(args)
+        else:
+            return str(args)
+
+
+class ZbxCli():
+
+    def __init__(self, default_module):
+        self.entry = server_url + '/' + default_module + "/%s"
+        self.util = ZbxCommon()
+        # self.etcd_prefix=etcd_prefix
+
+    def hostname(self, args):
+        print(self.util.get_hostname())
+
+    def ip(self, args):
+        ip = ''
+        if ip == '127.0.0.1' or ip == '':
+            try:
+                vip = self.util.url_fetch_witherr(self.entry % "vip", timeout=3).strip()
+                ip = self.util.url_fetch_witherr(self.entry % "ip", timeout=3).strip()
+                if ip in vip.split(','):
+                    ip = self.util.get_host_ip()
+            except Exception as er:
+                ip = self.util.get_host_ip()
+        if ip == '':
+            ip = '127.0.0.1'
+        print(ip)
+
+    def out_ip(self):
+        print(self.util.get_host_ip())
+
+    def download(self, args):
+        argv = self.util.parse_argv(args)
+        if isinstance(argv, list):
+            argv = {}
+        if 'f' in argv.keys():
+            f = argv['f']
+        else:
+            return '(error) -f(filename) require'
+        if 'd' not in argv:
+            d = '/'
+            try:
+                d = getpass.getuser()
+            except Exception as er:
+                pass
+            argv['d'] = d
+        if 'o' not in argv:
+            argv['o'] = argv['f']
+            try:
+                if len(str(argv['o']).split('/')) > 0 and str(argv['o']).startswith('/'):
+                    if not os.path.exists(os.path.basename(argv['o'])):
+                        os.makedirs(os.path.basename(argv['o']))
+            except Exception as er:
+                logger.error(er)
+        self.util.download(argv['f'], argv['d'], argv['o'])
+
+    def httpserver(self, args):
+        bflag = False
+        try:
+            __import__('simplefileserver')
+            bflag = True
+        except Exception as er:
+            self.util.execute('pip install simplefileserver', timeout=300)
+            try:
+                __import__('simplefileserver')
+                bflag = True
+            except Exception as er:
+                pass
+        argv = self.util.parse_argv(args)
+        port = 8000
+        directory = './'
+        if 'p' in argv:
+            port = argv['p']
+        if 'd' in argv:
+            directory = argv['d']
+        cmd = "cd %s && python -m SimpleHTTPServer %s" % (directory, port)
+        if bflag:
+            from simplefileserver import server
+            server(int(port))
+        else:
+            zbxcli = ZbxCommand(cmd)
+            zbxcli.run(timeout=-1)
+
+    def ftpserver(self, args):
+        argv = self.util.parse_argv(args)
+        try:
+            __import__('pyftpdlib')
+        except Exception as er:
+            self.util.execute('pip install pyftpdlib', timeout=180)
+        port = 21
+        directory = './'
+        user = ''
+        password = ''
+        if 'P' in argv:
+            port = argv['P']
+        if 'u' in argv:
+            user = argv['u']
+        if 'd' in argv:
+            directory = argv['d']
+        if 'p' in argv:
+            password = argv['p']
+        from pyftpdlib.authorizers import DummyAuthorizer
+        from pyftpdlib.handlers import FTPHandler
+        from pyftpdlib.servers import FTPServer
+        authorizer = DummyAuthorizer()
+        if user == '':
+            authorizer.add_anonymous(homedir=directory)
+        else:
+            authorizer.add_user(username=user, password=password, homedir=directory, perm='elradfmw')
+        handler = FTPHandler
+        handler.authorizer = authorizer
+        server = FTPServer(('0.0.0.0', port), handler)
+        server.serve_forever()
+
+    def print_exit(self, msg):
+        print(msg)
+        sys.exit(1)
+
+    def scp(self, args):
+        argv = self.util.parse_argv(args)
+        d = ''
+        f = ''
+        ip = self.util.get_host_ip()
+        if isinstance(argv, list):
+            argv = {}
+        if 'u' not in argv:
+            self.print_exit('(error) -u(user) require')
+        if 'f' in argv.keys():
+            f = argv['f']
+        else:
+            self.print_exit('(error) -f(filename) require')
+        if 'd' in argv.keys():
+            d = argv['d']
+        else:
+            self.print_exit('(error) -d(dest) require')
+        if not d.startswith('/'):
+            self.print_exit('(error) -d(dest) must be start with /')
+        if 'i' in argv.keys():
+            if ip == argv['i']:
+                self.print_exit('(error) -i(ip) must be remote ip')
+        else:
+            self.print_exit('(error) -i(ip) require')
+        if 'o' not in argv.keys():
+            argv['o'] = 'text'
+        if 't' not in argv.keys():
+            argv['t'] = '60'
+        if not os.path.exists(f):
+            self.print_exit('file %s not found ' % (f))
+        self.util.upload(self.entry % "scp", argv['f'], argv['d'], argv['i'], argv['o'], argv['t'], argv['u'])
+
+    def upload(self, args):
+        argv = self.util.parse_argv(args)
+        if isinstance(argv, list):
+            argv = {}
+        if 'f' in argv.keys():
+            f = argv['f']
+        else:
+            return '(error) -f(filename) require'
+        if 'd' not in argv:
+            d = '/'
+            try:
+                d = getpass.getuser()
+            except Exception as er:
+                pass
+            argv['d'] = d
+        self.util.upload(self.entry % "upload", argv['f'], argv['d'])
+
+    def help(self, args):
+        try:
+            ret2 = ''
+            ret = '{"help": "\\n\\n        ########  \\u767b\\u9646\\u76f8\\u5173  ########\\n\\n        cli login -u username -p password #\\u7528\\u6237\\u540d\\u5bc6\\u7801\\u767b\\u9646\\n        cli logout #\\u767b\\u51fa\\n        cli register -u username -p password #\\u6ce8\\u518c\\u7528\\u6237 \\n        cli enableuser -u username #\\u542f\\u7528\\u7528\\u6237\\n        cli disableuser -u username #\\u7981\\u7528\\u7528\\u6237\\n        cli deluser -u username #\\u5220\\u9664\\u7528\\u6237\\n\\n        ##########  shell\\u76f8\\u5173  ##########\\n\\n        echo hello | cli len  ##\\u5b57\\u7b26\\u4e32\\u957f\\u5ea6 \\u6570\\u636e\\u957f\\u5ea6\\u7b49\\n        echo hello | cli upper  ##\\u5b57\\u7b26\\u4e32\\u8f6c\\u5927\\u5199\\n        echo HELLO | cli lower  ##\\u5b57\\u7b26\\u4e32\\u8f6c\\u5c0f\\u5199\\n        echo \'hello,world\' |cli split -s \',\' ##\\u5b57\\u7b26\\u4e32\\u5206\\u9694\\n        echo \'hello,world\' |cli split -s \',\'|cli join -s \' \'\\u3000##\\u6570\\u7ec4\\u5e76\\u63a5\\n        echo \'hello,world\' |cli split -s \',\'|cli jq -k 0 |cli join \\u3000##\\u6570\\u7ec4\\u5e76\\u63a5\\n        echo \'hello,world\' |cli match -m \'[\\\\w+]+$\' -o aim\\u3000##\\u5b57\\u7b26\\u6b63\\u5219\\u5339\\u914d -o aim (i:ignoresencase,a:all,m:mutiline)\\n        echo \'hello,world\' |cli cut -p 5:-1  ##\\u5b57\\u7b26\\u4e32\\u622a\\u53d6\\n        echo \'{\\"name\\":\\"hello\\",\\"date\\":\\"2018-11-09\\"}\'|cli jq -k name  ##json\\u89e3\\u6790\\u5668\\n        cli md5 -s \'hello\'\\u3000##\\u5b57\\u7b26md5\\n        cli md5 -f filename ##\\u6587\\u4ef6md5\\n        cli uuid ##\\u968f\\u673auuid\\n        cli rand ##\\u968f\\u673a\\u6570\\n        cli jq -k key ## json\\u89e3\\u6790\\u5668\\uff0c-k json\\u4e2d\\u7684key\\uff0c\\u5d4c\\u5957\\u65f6\\u4f7f\\u7528\\u9017\\u53f7\\u5206\\u9694\\uff0c\\u5982 -k data,rows,ip  \\n        cli jf -w where -c column ## json \\u6570\\u7ec4\\u8fc7\\u6ee4\\u5668  -w sql\\u4e2d\\u7684where\\u6761\\u4ef6 -c sql\\u4e2d\\u7684column  \\n        cli randint -r 100:1000 ##100-1000\\u968f\\u673a\\u6570\\n        cli randstr -l 20 ##\\u968f\\u673a\\u6570\\u5b57\\u7b26\\u4e32\\n        cli machine_id  ##\\u5ba2\\u6237\\u7aef\\u7f16\\u53f7\\n        cli color -c(red|yello|green|) -m message ##\\u8f93\\u51fa\\u6709\\u8272\\u4fe1\\u606f\\n        cli wlog - m message  # \\u8bb0\\u5f55\\u65e5\\u5fd7\\u5230 /var/log/cli.log\\u4e0b\\u3000\\n        cli lshell -f filename -t timeout #\\u672c\\u5730\\u6267\\u884c\\u6587\\u4ef6\\u9ed8\\u8ba4\\u8d85\\u65f610\\u5206\\u949f \\n        cli rshell -f filename -d username -t timeout -a arguments(json) #\\u6587\\u4ef6\\u9700\\u767b\\u9646\\u540e\\u4e0a\\u4e13\\u5230\\u4e2d\\u5fc3\\u670d\\u52a1\\u5668 \\n        cli y2j -f filename ## yaml \\u8f6c json\\n        cli j2y -f filename -o filename ## json \\u8f6c yaml\\n        cli csv ## json\\u8f6cSVC\\u683c\\u5f0f\\n        cli tosql ## \\u8f6cSQL\\n        cli kvs ## json dict\\u8f6c\\u73af\\u5883\\u53d8\\u91cf\\n\\n\\n        ##########  \\u72b6\\u6001\\u76f8\\u5173  ########\\n\\n        cli status (\\u5ba2\\u6237\\u7aef\\u5728\\u7ebf\\u72b6\\u6001)\\n        cli run_status\\u3000\\uff08\\u670d\\u52a1\\u7aef\\u8fd0\\u884c\\u65f6\\u4fe1\\u606f\\uff09\\n        cli check_status (\\u68c0\\u67e5\\u670d\\u52a1\\u7ec4\\u4ef6\\u72b6\\u6001\\uff09\\n        cli info (\\u67e5\\u770b\\u5ba2\\u6237\\u7aef\\u4fe1\\u606f\\uff09\\n        cli check -i ip(\\u5ba2\\u6237\\u7aefip)\\n        cli repair -i ip(\\u5ba2\\u6237\\u7aefip)\\n\\n        ##########  \\u6587\\u4ef6\\u76f8\\u5173  ##########\\n\\n        cli upload -f filename ##\\u6587\\u4ef6\\u4e0a\\u4f20(\\u9700\\u767b\\u9646)\\n        cli delfile -f filename ##\\u5220\\u9664\\u6587\\u4ef6(\\u9700\\u767b\\u9646)\\n        cli download -f filename -d dirname(\\u767b\\u9646\\u7684\\u7528\\u6237\\u540d) ##\\u4e0b\\u8f7d\\u6587\\u4ef6\\n        cli listfile -d directory ##\\u67e5\\u770b\\u6587\\u4ef6\\n        cli scp -f filename(\\u672c\\u5730\\u6587\\u4ef6\\u540d)  -d dir(\\u8fdc\\u7a0b\\u76ee\\u5f55) -i ip(\\u8fdc\\u7a0b\\u4e3b\\u673aip)  ##\\u8fdc\\u7a0b\\u590d\\u5236\\u6587\\u4ef6\\n\\n        ########  (\\u547d\\u4ee4/\\u811a\\u672c)\\u6267\\u884c  ########\\n        cli cmd -u user --sudo 1 -c cmd -i ip -t timeout ## sudo \\u662f\\u5426(1:\\u662f,0:\\u5426)\\n        cli cmd -u user --sudo 1 -c cmd -i ip -t timeout ## sudo \\u662f\\u5426(1:\\u662f,0:\\u5426) \\u53ef\\u6709\\u8272\\u8f93\\u51fa\\u4fe1\\u606f\\uff0c\\u7c7bansible\\n        cli rshell -f filename -d username -a argument(json) -t timeout ##\\u8fdc\\u7a0b\\u6267\\u884c\\u811a\\u672c,\\u811a\\u672c\\u8981\\u5148\\u4e0a\\u4f20\\n\\n"}'
+            ret = json.loads(ret)['help']
+            argv = self.util.getopt(args)
+            ret2 = self.util.url_fetch_witherr(self.entry % 'help', {'param': json.dumps(argv)})
+        except Exception as er:
+            pass
+        try:
+            print(ret + "\n" + ret2)
+        except Exception as er:
+            pass
+
+    def upgrade(self, args):
+        fn = self.util.exec_filename()
+        content = self.util.url_fetch(self.entry % 'upgrade')
+        if content != '':
+            open('/tmp/cli', 'w').write(content)
+            os.system('chattr -i /bin/cli')
+            os.system('chmod +x /tmp/cli')
+            if PLATFORM == 'darwin':
+                os.system('mv -f /tmp/cli %s' % ('/usr/local/bin/cli'))
+            else:
+                os.system('mv -f /tmp/cli %s' % (client_filename))
+                os.system('chattr +i /tmp/cli')
+            print('success')
+        else:
+            print('fail')
+
+    def adddoc(self, args):
+        argv = self.util.getopt(args)
+        if 'f' in argv:
+            argv['d'] = open(argv['f'], 'r').read()
+
+        ret = self.util.url_fetch(self.entry % 'adddoc', {'param': json.dumps(argv)})
+        print(ret)
+
+    def daemon(self, argv):
+        daemon = ZbxDaemon(pidfile)
+        setattr(daemon, 'zbxcli', self)
+        # key_file='/etc/cli/etcd-worker-key.pem'
+        # cert_file='/etc/cli/etcd-worker.pem'
+        # if os.path.exists(key_file) and os.path.exists(cert_file):
+        #     opener=urllib2.build_opener(HTTPSHandler(cert_file=cert_file,key_file=key_file))
+        #     urllib2.install_opener(opener)
+
+        data = self.util.getopt(sys.argv[1:])
+        opt = data.get('s')
+        if PLATFORM == 'windows':
+
+            winDaemon = ZbxDaemonWin(daemon)
+            if 'start' == opt:
+                print("cli daemon start")
+                winDaemon.action('start')
+            elif 'stop' == opt:
+                print("cli daemon stop")
+                winDaemon.action('stop')
+            elif 'restart' == opt:
+                print("cli daemon restart")
+                winDaemon.action('restart')
+            elif 'debug' == opt:
+                # global global_debug
+                global_debug = True
+                daemon.run()
+            elif 'kill' == opt:
+                daemon.kill()
+            elif 'install' == opt:
+                winDaemon.action('install')
+            elif 'status' == opt:
+                winDaemon.action('status')
+            elif 'remove' == opt:
+                winDaemon.action('remove')
+            else:
+                print("usage: cli deamon -s debug|start|stop|restart|status")
+                sys.exit(2)
+            sys.exit(0)
+        else:
+            if 'start' == opt:
+                print("cli daemon start")
+                daemon.start()
+            elif 'stop' == opt:
+                print("cli daemon stop")
+                daemon.stop()
+            elif 'restart' == opt:
+                print("cli daemon restart")
+                daemon.restart()
+            elif 'debug' == opt:
+                # global global_debug
+                global_debug = True
+                daemon.run()
+            elif 'kill' == opt:
+                daemon.kill()
+            elif 'install' == opt:
+                pass
+            elif 'status' == opt:
+                daemon.status()
+            else:
+                print("usage: cli deamon -s debug|start|stop|restart|status")
+                sys.exit(2)
+            sys.exit(0)
+
+    def logout(self, argv):
+        home = os.path.expanduser('~')
+        fn = home + '/.cli'
+        if os.path.isfile(fn):
+            with open(fn, "w") as f:
+                f.write('')
+
+    def register(self, argv):
+        data = self.util.getopt(sys.argv[1:])
+        if 'u' not in data:
+            if PY3:
+                data['u'] = input('please input username: ')
+            else:
+                data['u'] = raw_input('please input username: ')
+        if 'p' not in data:
+            data['p'] = getpass.getpass('please input password: ')
+        ret = self.util.url_fetch(server_url + '/%s/%s' % (module, action), {'param': json.dumps(data)})
+        print(ret)
+
+    def login(self, argv):
+        data = self.util.getopt(sys.argv[1:])
+        if 'u' not in data:
+            if PY3:
+                data['u'] = input('please input username: ')
+            else:
+                data['u'] = raw_input('please input username: ')
+        if 'p' not in data:
+            data['p'] = getpass.getpass('please input password: ')
+        ret = self.util.url_fetch(server_url + '/%s/%s' % (module, action), {'param': json.dumps(data)})
+        if len(ret) == 36:
+            self.util._set_config('auth-uuid', str(ret).strip())
+            print('success')
+        else:
+            print(ret)
+
+    def rexec(self, argv):
+        data = self.util.getopt(sys.argv[1:])
+        if 'u' not in data:
+            if PY3:
+                data['u'] = input('please input username: ')
+            else:
+                data['u'] = raw_input('please input username: ')
+        if 'p' not in data:
+            data['p'] = getpass.getpass('please input password: ')
+        ret = self.util.url_fetch(server_url + '/%s/%s' % (module, action), {'param': json.dumps(data)})
+        print(ret)
+
+    #     def config(self,argv):
+    #         conf='''
+    # pidfile=/var/zbxcli.pid
+    # server_url=%s
+    # '''%(server_url)
+    #         with open(configfile,'w') as f:
+    #             f.write(conf)
+
+    def default(self, module, action, args):
+        if action == 'api':
+            print('deny')
+            return
+        argv = self.util.getopt(args)
+        if isinstance(argv, list):
+            argv = {}
+        if isinstance(argv, dict):
+            if not 's' in argv:
+                argv['s'] = self.util.get_hostname()
+            if not 'i' in argv:
+                argv['i'] = self.util.get_one_ip()
+            files = ['file', 'key_file', 'key']
+            for fk in files:
+                if fk in argv and os.path.isfile(argv[fk]):
+                    argv['filename'] = argv[fk]
+                    fp = open(argv[fk], 'rb')
+                    argv[fk] = fp.read()
+                    fp.close()
+
+            # if not 'g' in argv:
+            #    argv['g']="Discovered hosts"
+            # if not 't' in argv:
+            #    argv['t']="Meizu-System"
+        try:
+            ret = self.util.url_fetch_witherr(server_url + '/%s/%s' % (module, action), {'param': json.dumps(argv)},
+                                              timeout=3 * 60)
+        except Exception as er:
+            print(cli.util.color('Server is not ok.', 'red'))
+            return
+        if ret.strip() != '':
+            try:
+                ret = json.dumps(json.loads(ret), sort_keys=True, indent=2, ensure_ascii=False)
+            except Exception as er:
+                pass
+        print(ret)
+        return ret
+
+    def rshell(self, args):
+        argv = self.util.getopt(args)
+        argv['action'] = 'rshell'
+        return self._cmd(argv)
+
+    def cmd(self, args):
+        argv = self.util.getopt(args)
+        argv['action'] = 'api'
+        return self._cmd(argv)
+
+    def _cmd(self, argv):
+        p = 5
+        sleep = 0
+        action = 'api'
+        if 'action' in argv:
+            action = argv['action']
+        if isinstance(argv, list):
+            argv = {}
+        group = ''
+        if 'p' in argv:
+            p = int(argv['p'])
+        if 'sleep' in argv:
+            sleep = float(argv['sleep'])
+        if 'g' in argv:
+            group = argv['g']
+            group = '[%s]' % (group)
+        ips = []
+        start = False
+        if group == '':
+            start = True
+        if 'i' in argv:
+            if os.path.isfile(argv['i']):
+                host = open(argv['i'], 'r').read()
+                lines = self.util.split(host, r'[\r\n]+')
+                for line in lines:
+                    if line.startswith('#'):
+                        continue
+                    if group != '' and line == group:
+                        start = True
+                    if line.startswith('[') and len(ips) > 0 and group != '':
+                        break
+                    if line.startswith('['):
+                        continue
+                    if start and line.strip() != '':
+                        ips.append(line.strip())
+        if len(ips) > 0:
+            argv['i'] = ','.join(ips)
+        if isinstance(argv, dict):
+            if not 's' in argv:
+                argv['s'] = self.util.get_hostname()
+            if not 'i' in argv:
+                argv['i'] = self.util.get_one_ip()
+            files = ['file', 'key_file', 'key', 'f']
+            for fk in files:
+                if fk in argv and os.path.isfile(argv[fk]):
+                    argv['filename'] = argv[fk]
+                    fp = open(argv[fk], 'rb')
+                    argv[fk] = fp.read()
+                    fp.close()
+
+                    # if not 'g' in argv:
+                    #    argv['g']="Discovered hosts"
+                    # if not 't' in argv:
+                    #    argv['t']="Meizu-System"
+        output = ''
+        if 'o' in argv:
+            output = argv
+        else:
+            argv['o'] = 'json2'
+            output = ''
+
+        def sendcmd(argv):
+            logger.info("sendcmd info:\n" + str(json.dumps(argv)))
+            ret = self.util.url_fetch(server_url + '/%s/%s' % (module, action), {'param': json.dumps(argv)},
+                                      timeout=30 * 60)
+            logger.info("cmd result:\n" + str(ret))
+            if output != '':
+                if ret.strip() != '':
+                    try:
+                        ret = json.dumps(json.loads(ret), sort_keys=True, indent=2, ensure_ascii=False)
+                    except Exception as er:
+                        pass
+                print(ret)
+                return ret
+            rows = []
+            rets = []
+            fails = ''
+            try:
+                result = json.loads(ret)
+                rows = result['results']
+                if len(rows) == 0:
+                    print(json.dumps(json.loads(ret), sort_keys=True, indent=2, ensure_ascii=False))
+                    return
+                fails = result['failsip']
+                for row in rows:
+                    if str(row['result']).startswith('(error)'):
+                        message = "%s\n%s|failed\n%s\n\n" % ('-' * 80, row['i'], row['result'])
+                        rets.append(self.util.color(message, color='yello'))
+                    elif row['return_code'] == 0:  # and not str(row['result']).startswith('(error) timeout'):
+                        message = "%s\n%s|success\n%s\n\n" % ('-' * 80, row['i'], row['result'])
+                        rets.append(self.util.color(message, color='green'))
+                    else:
+                        message = "%s\n%s|failed\n%s\n\n" % ('-' * 80, row['i'], row['result'])
+                        rets.append(self.util.color(message, color='red'))
+                if len(fails) > 0:
+                    message = "%s\n%s\n%s\n\n" % ('-' * 80, 'fails', fails)
+                    rets.append(self.util.color(message, color='glint'))
+            except Exception as er:
+                logger.error(str(er) + str(ret))
+                print(ret)
+                sys.exit(1)
+            print("\n".join(rets))
+
+        ips = argv['i'].split(',')
+        bips = []
+        for i in ips:
+            bips.append(i)
+            if len(bips) < p:
+                continue
+            else:
+                argv['i'] = ','.join(bips)
+                sendcmd(argv)
+                bips = []
+                if sleep > 0:
+                    time.sleep(sleep)
+        if len(bips) > 0:
+            argv['i'] = ','.join(bips)
+            sendcmd(argv)
+
+    def request(self, args):
+        argv = self.util.getopt(args)
+        url = ''
+        if not 'url' in argv.keys():
+            print('--url(url) url is request')
+            return
+        else:
+            url = argv['url']
+            if not str(url).startswith('http'):
+                if not str(url).startswith('/'):
+                    url = server_url + '/' + url
+                else:
+                    url = server_url + url
+        keys = ['__func__', '__ctrl__', 'url']
+        data = {}
+        header = {}
+        for key in keys:
+            if key in argv.keys():
+                del argv[key]
+        if 'd' in argv:
+            d = argv['d']
+            try:
+                kv = json.loads(d)
+                for k in kv.keys():
+                    data[k] = kv[k]
+            except Exception as er:
+                pass
+        if 'h' in argv:
+            d = argv['h']
+            try:
+                kv = json.loads(d)
+                for k in kv.keys():
+                    header[k] = kv[k]
+            except Exception as er:
+                pass
+        for key in argv.keys():
+            if key not in ['d', 'd']:
+                data[key] = argv[key]
+        method = "GET"
+        if len(data) > 0:
+            method = "POST"
+        try:
+            result = self.util.url_fetch_witherr(url, data=data, header=header, httpCmd=method)
+            print(result)
+            return result
+        except Exception as er:
+            print(er)
+
+    def info(self, argv):
+        info = {'server': server_url, 'version': CLI_VERSION, 'python': platform.python_version(), 'group': CLI_GROUP}
+        print(json.dumps(info, sort_keys=True, indent=2))
+
+    def md5(self, argv):
+        data = self.util.getopt(sys.argv[1:])
+        if not 's' in data and not 'f' in data:
+            print('-s(string) is required or -f(file name) is required')
+            return
+        if 'f' in data:
+            if os.path.exists(data['f']):
+                with open(data['f'], 'rb') as fp:
+                    data['s'] = fp.read()
+            else:
+                print('-f(filename) is not found ')
+                return
+        print(self.util.md5(data['s']))
+
+    def uuid(self, argv):
+        print(self.util.get_uuid())
+
+    def machine_id(self, argv):
+        print(self.util.get_product_uuid())
+
+    def tosql(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        source = ''
+        filename = ''
+        table = 'data'
+        quote = ''
+        if 's' in argv:
+            source = argv['s']
+        if 'q' in argv:
+            quote = argv['q']
+        if 't' in argv:
+            table = argv['t']
+        if 'f' in argv:
+            filename = argv['f']
+            with open(filename, 'r') as ff:
+                source = ff.read()
+        else:
+            infile = sys.stdin
+            with infile:
+                if source == '':
+                    source = infile.read()
+        try:
+            results = []
+            keys = []
+            rows = json.loads(source)
+            if len(rows) > 0:
+                keys = rows[0].keys()
+                keys2 = keys
+                if quote != '':
+                    keys2 = map(lambda x: '%s%s%s' % (quote, x, quote), keys)
+            for row in rows:
+                result = []
+                for k in keys:
+                    v = row.get(k)
+                    if isinstance(v, str):
+                        v = v.replace("'", "\\'")
+                    result.append("'%s'" % (v))
+                results.append(
+                    'insert into %s%s%s(%s) values(%s);' % (quote, table, quote, ','.join(keys2), ','.join(result)))
+            print("\n".join(results))
+        except Exception as er:
+            pass
+            print(er)
+
+    def tocsv(self, argv):
+        return self.csv(argv)
+
+    def csv(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        source = ''
+        filename = ''
+        if 's' in argv:
+            source = argv['s']
+        if 'f' in argv:
+            filename = argv['f']
+            with open(filename, 'r') as ff:
+                source = ff.read()
+        else:
+            infile = sys.stdin
+            with infile:
+                if source == '':
+                    source = infile.read()
+        try:
+            results = []
+            keys = []
+            rows = json.loads(source)
+            if len(rows) > 0:
+                keys = rows[0].keys()
+            results.append(','.join(keys))
+            for row in rows:
+                result = []
+                for k in keys:
+                    v = row.get(k)
+                    if isinstance(v, str):
+                        v = v.replace('"', '\"')
+                    result.append('"%s"' % (v))
+                results.append(','.join(result))
+            print("\n".join(results))
+        except Exception as er:
+            pass
+            print(er)
+
+    def py(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        source = ''
+        filename = ''
+        if 's' in argv:
+            source = argv['s']
+            source = source.replace('\\n', "\n")
+        if 'f' in argv:
+            filename = argv['f']
+            with open(filename, 'r') as ff:
+                source = ff.read()
+        else:
+            if source == '':
+                infile = sys.stdin
+                with infile:
+                    if source == '':
+                        source = infile.read()
+        try:
+            exec(source)
+
+        except Exception as er:
+            pass
+            print(er)
+
+    def eval(self, argv):
+        context = {}
+        argv = self.util.getopt(sys.argv[1:])
+        source = ''
+        method = 'dir'
+        filename = ''
+        args = ''
+        if 'm' in argv:
+            method = argv['m']
+        if 's' in argv:
+            source = argv['s']
+        if 'f' in argv:
+            filename = argv['f']
+        if 'a' in argv:
+            args = argv['a']
+        if 'f' in argv:
+            filename = argv['f']
+            with open(filename, 'r') as ff:
+                source = ff.read()
+            exec(source, context)
+        if 's' in argv:
+            print(eval(source))
+            return
+        infile = sys.stdin
+        with infile:
+            if source == '':
+                source = infile.read()
+            exec(source, context)
+        if method == 'dir':
+            if hasattr(context, method):
+                print(getattr(context, method)())
+                return
+        if not callable(context[method]):
+            print(context[method])
+        if args != '':
+            print(context[method](*args.split(' ')))
+        else:
+            print(context[method]())
+
+    def pq(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        selector = 'html'
+        method = 'text'
+        html = ''
+        filename = ''
+        args = ''
+        if 's' in argv:
+            selector = argv['s']
+        if 'm' in argv:
+            method = argv['m']
+        if 'c' in argv:
+            html = argv['c']
+        if 'f' in argv:
+            filename = argv['f']
+        if 'a' in argv:
+            args = argv['a']
+        try:
+            if filename != '':
+                with open(filename, 'r') as ff:
+                    html = ff.read()
+            else:
+                if html == '':
+                    infile = sys.stdin
+                    with infile:
+                        if html == '':
+                            html = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _jq(html, selector='html', method='html', args=''):
+            try:
+                from pyquery import PyQuery as PQ
+            except Exception as er:
+                ZbxCommand('pip install pyquery').run(timeout=120)
+                try:
+                    from pyquery import PyQuery as PQ
+                except Exception as er:
+                    print('please run cmd ,  pip install pyquery')
+
+            doc = PQ(html)
+            doc = doc(selector)
+            if hasattr(doc, method):
+                if args != '':
+                    return getattr(doc, method)(args)
+                else:
+                    return getattr(doc, method)()
+
+        print(_jq(html, selector, method, args))
+
+    def len(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+                    try:
+                        d = json.loads(s)
+                        if isinstance(d, list) or isinstance(d, dict):
+                            print(len(d))
+                            return
+                    except Exception as er:
+                        pass
+                    print(len(s.strip()))
+                    return
+        except Exception as er:
+            print(len(s.strip()))
+
+    def keys(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+                    try:
+                        d = json.loads(s)
+                        if isinstance(d, dict):
+                            print(json.dumps(d.keys(), sort_keys=True, indent=2, ensure_ascii=False))
+                            return
+                    except Exception as er:
+                        pass
+                    print('')
+                    return
+        except Exception as er:
+            print('')
+
+    def kvs(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        key = ''
+        ks = []
+        readonly = False
+        if 'r' in argv:
+            readonly = True
+        if 'k' in argv:
+            key = argv['k']
+            if key.find(',') > 0:
+                ks = key.split(',')
+            else:
+                ks = key.split('.')
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+                    try:
+                        d = json.loads(s)
+                        ret = []
+                        if isinstance(d, dict):
+                            for k in d.keys():
+                                if len(ks) > 0 and k not in ks:
+                                    continue
+                                if isinstance(d[k], dict) or isinstance(d[k], list):
+                                    ret.append(
+                                        k + '="%s"' % (json.dumps(d[k]).replace('\\', '\\\\').replace('"', '\\"')))
+                                    if readonly:
+                                        ret.append('readonly %s' % (k))
+                                else:
+                                    ret.append(k + '="%s"' % (str(d[k]).replace('"', '\"')))
+                                    if readonly:
+                                        ret.append('readonly %s' % (k))
+                            print("\n".join(ret))
+                            return
+                        if isinstance(d, list):
+                            j = 0
+                            for i in d:
+                                ret.append('a' + str(j) + '="%s"' % (str(i).replace('"', '\"')))
+                                j = j + 1
+                            print("\n".join(ret))
+                            return
+                    except Exception as er:
+                        pass
+                    print('')
+                    return
+        except Exception as er:
+            print('')
+
+    def cut(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        p = ''
+        if 'p' in argv:
+            p = argv['p']
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _cut(s, p):
+            pos = p.split(':')
+            if len(pos) == 1:
+                return s[int(pos[0])]
+            if len(pos) == 2:
+                return s[int(pos[0]):int(pos[1])]
+
+        print(_cut(s, p))
+
+    def join(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        sep = ','
+        wrap = ''
+        trim = False
+        if 't' in argv:
+            trim = True
+        if 'w' in argv:
+            wrap = argv['w']
+        if 's' in argv:
+            if argv['s'] != self.util.get_hostname():
+                sep = argv['s']
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = json.loads(infile.read())
+        except Exception as er:
+            data = {}
+            pass
+
+        def _join(s, sep):
+            if isinstance(s, list):
+                if trim:
+                    t = []
+                    for i in s:
+                        if isinstance(i, str) or isinstance(i, unicode):
+                            if i.strip() == '':
+                                continue
+                        if i == None:
+                            continue
+                        t.append(i)
+                    s = t
+                if wrap != '':
+                    s = ['%s%s%s' % (wrap, str(i), wrap) for i in s]
+                return sep.join(s)
+            return s
+
+        print(_join(s, sep))
+
+    def tail(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        num = 10
+        if 'n' in argv:
+            try:
+                num = int(argv['n'])
+            except Exception as er:
+                pass
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _tail(s):
+            lines = re.split("\n", s)
+            return "\n".join(lines[-num:])
+
+        print(_tail(s))
+
+    def head(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        num = 10
+        if 'n' in argv:
+            try:
+                num = int(argv['n'])
+            except Exception as er:
+                num = argv['n']
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _head(s, num):
+            lines = re.split("\n", s)
+            if str(num).find(":") > 0:
+                nums = str(num).split(":")
+                if len(nums) == 2 and nums[1] != "":
+                    return "\n".join(lines[int(nums[0]):int(nums[1])])
+                else:
+                    return "\n".join(lines[int(nums[0]):])
+            return "\n".join(lines[0:int(num)])
+
+        print(_head(s, num))
+
+    def split(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        sep = ','
+        if 's' in argv:
+            if argv['s'] != self.util.get_hostname():
+                sep = argv['s']
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _split(s, sep):
+            s = s.strip()
+            return re.split(re.compile(sep, re.MULTILINE | re.IGNORECASE), s)
+
+        print(json.dumps(_split(s, sep)))
+
+    def splitj(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        sep = ','
+        field_pat = '\s{1,}'
+        line_pat = '\n'
+        header = ''
+        ftype = 'table'
+        if 't' in argv:
+            ftype = argv['t']
+            if ftype == 'kv':
+                if not 'l' in argv:
+                    line_pat = '\s{1,}'
+                if not 'f' in argv:
+                    field_pat = '='
+        if 'f' in argv:
+            field_pat = argv['f']
+        if 'l' in argv:
+            line_pat = argv['l']
+        if 'h' in argv:
+            header = argv['h']
+        if 's' in argv:
+            if argv['s'] != self.util.get_hostname():
+                sep = argv['s']
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _splitj(s, line_pat, field_pat, header, ftype):
+            s = s.strip()
+            lines = re.split(line_pat, s)
+            if len(lines) == 0:
+                return []
+            data = []
+            if ftype == 'table':
+                if header == '':
+                    header = lines[0]
+                fields = re.split(field_pat, header)
+                for i in lines[1:]:
+                    vals = re.split(field_pat, i)
+                    k = 0
+                    row = {}
+                    if len(vals) <= len(fields):
+                        for j in vals:
+                            row[fields[k]] = vals[k]
+                            k = k + 1
+                        data.append(row)
+            elif ftype == 'kv':
+                data = {}
+                for i in lines:
+                    vals = re.split(field_pat, i)
+                    if len(vals) == 2:
+                        data[vals[0]] = vals[1]
+            return data
+
+        print(json.dumps(_splitj(s, line_pat, field_pat, header, ftype), sort_keys=True, indent=2, ensure_ascii=False))
+
+    def rand(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        print(random.random())
+
+    def randstr(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        l = '10'
+        if 'l' in argv:
+            try:
+                l = int(argv['l'])
+            except Exception as er:
+                pass
+        seq = [chr(x) for x in range(65, 91)]
+        ret = []
+        i = int(l)
+        while i > 0:
+            i = i - 1
+            ret.append(seq[random.randint(0, len(seq) - 1)])
+        print(''.join(ret))
+
+    def randint(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        r = '1:100'
+        if 'r' in argv:
+            if len(argv['r'].strip().split(':')) == 2:
+                r = argv['r']
+        r = r.split(':')
+        if len(r) == 2:
+            print(random.randint(int(r[0]), int(r[1])))
+        else:
+            print(random.randint(0, 100))
+
+    def lower(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+        print(s.strip().lower())
+
+    def upper(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+        print(s.strip().upper())
+
+    def replace(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        n = ''
+        o = ''
+        if 'o' in argv:
+            o = argv['o']
+        if 'n' in argv:
+            n = argv['n']
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _replace(s, o, n):
+            ret = re.subn(re.compile(o, re.MULTILINE | re.IGNORECASE), n, s)
+            if len(ret) > 0:
+                return ret[0].strip()
+            else:
+                return s.strip()
+
+        print(_replace(s, o, n))
+
+    def jf(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        w = ''
+        s = ''
+        c = '*'
+        limit = '0,10000000'
+        order = ''
+        filename = ''
+        table = 'data'
+        data = {}
+        if 'w' in argv:
+            w = argv['w']
+        if 't' in argv:
+            table = argv['t']
+        if 'c' in argv:
+            c = argv['c']
+        if 's' in argv:
+            s = argv['s']
+        if 'f' in argv:
+            filename = argv['f']
+        if 'l' in argv:
+            limit = argv['l']
+        if 'o' in argv:
+            order = argv['o']
+        try:
+            if s == '':
+                infile = sys.stdin
+                with infile:
+                    if s == '':
+                        s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        if w == '' and c == '':
+            print(s)
+            sys.exit(0)
+        if w == '':
+            w = '1=1'
+        try:
+            import sqlite3
+        except Exception as er:
+            logger.error(er)
+            print(er)
+            sys.exit(1)
+        try:
+            data = json.loads(s)
+            if not isinstance(data, list):
+                logger.warn('(error) just support list')
+        except Exception as er:
+            logger.error(er)
+
+        def _query(data, _sql, db_file=''):
+            con = None
+            cols = set()
+            keyword = ['ALTER',
+                       'CLOSE',
+                       'COMMIT',
+                       'CREATE',
+                       'DECLARE',
+                       'DELETE',
+                       'DENY',
+                       'DESCRIBE',
+                       'DOMAIN',
+                       'DROP',
+                       'EXECUTE',
+                       'EXPLAN',
+                       'FETCH',
+                       'GRANT',
+                       'INDEX',
+                       'INSERT',
+                       'OPEN',
+                       'PREPARE',
+                       'PROCEDURE',
+                       'REVOKE',
+                       'ROLLBACK',
+                       'SCHEMA',
+                       'SELECT',
+                       'SET',
+                       'SQL',
+                       'TABLE',
+                       'TRANSACTION',
+                       'TRIGGER',
+                       'UPDATE',
+                       'VIEW',
+                       'GROUP']
+            for row in data:
+                for k in list(row.keys()):
+                    k2 = k
+                    if str(k).upper() in keyword:
+                        # k2='_'+str(k)
+                        k2 = '`_%s`' % (k)
+                        row[k2] = row[k]
+                    else:
+                        k2 = '`%s`' % (k)
+                        row[k2] = row[k]
+                    del row[k]
+                    cols.add(k2)
+
+            try:
+                import sqlite3
+
+                try:
+
+                    if db_file != '':
+                        con = sqlite3.connect(db_file)
+                    else:
+                        con = sqlite3.connect(':memory:')
+                except Exception as er:
+                    print(er)
+
+                if len(data) > 0:
+                    sql = 'create table %s(%s)' % (table, ','.join(cols))
+                    con.execute(sql)
+
+                for row in data:
+                    keys = []
+                    vals = []
+                    foo = []
+                    for k, v in row.items():
+                        keys.append(k)
+                        # vals.append("'%s'" % (str(v).replace("'", "\\'")))
+                        vals.append(v)
+                        foo.append("?")
+                    sql = 'insert into %s(%s) values(%s)' % (table, ','.join(keys), ','.join(foo))
+                    con.execute(sql, tuple(vals))
+                    con.commit()
+                cur = con.execute(_sql)
+                if cur.rowcount > 0:
+                    con.commit()
+                    print('ok')
+                    sys.exit(0)
+                    return
+
+                rows = []
+                fields = []
+                for f in range(len(cur.description)):
+                    if isinstance(cur.description[f][0], str):
+                        fields.append(cur.description[f][0])
+                for _row in cur:
+                    j = 0
+                    row = {}
+                    for i in _row:
+                        row[fields[j]] = i
+                        j = j + 1
+                    rows.append(row)
+                return rows
+            except Exception as er:
+                logger.error(er)
+            finally:
+                try:
+                    con.close()
+                except Exception as er:
+                    pass
+
+        if order != '':
+            order = 'order by %s' % (order)
+        sql = "select %s from %s where 1=1 and %s %s limit %s" % (c, table, w, order, limit)
+        if filename != '':
+            sql = s
+        print(json.dumps(_query(data, sql, filename), sort_keys=True, indent=2, ensure_ascii=False))
+
+    def match(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        s = ''
+        o = 'ima'
+        m = '.*'
+        if 'o' in argv:
+            o = argv['o']
+        if 's' in argv:
+            s = argv['s']
+        if 'm' in argv:
+            m = argv['m']
+        try:
+            infile = sys.stdin
+            with infile:
+                if s == '':
+                    s = infile.read()
+        except Exception as er:
+            data = {}
+            pass
+
+        def _match(s, m, o='ima'):
+            flags = 0
+            is_all = False
+            for i in range(0, len(o)):
+                if o[i] == 'i':
+                    flags = flags | re.IGNORECASE
+                if o[i] == 'm':
+                    flags = flags | re.MULTILINE
+                if o[i] == 'a':
+                    is_all = True
+            r = re.compile(m, flags=flags)
+            ret = r.findall(s)
+            if is_all:
+                return json.dumps(ret)
+            if len(ret) > 0:
+                return ret[0]
+            else:
+                return ''
+
+        print(_match(s, m, o))
+
+    def jq(self, argv):
+        return self.json_val(argv)
+
+    def _install(self, module):
+        try:
+            for m in module:
+                mod = __import__(m)
+            return True
+        except Exception as er:
+            return False
+
+    def y2j(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        infile = None
+        if 'f' in argv and os.path.exists(argv['f']):
+            infile = open(argv['f'], 'r')
+        if infile == None:
+            infile = sys.stdin
+        try:
+            import yaml
+        except Exception as er:
+            try:
+                print('install pyyaml.....')
+                ZbxCommand('pip install pyyaml').run(timeout=120)
+                import yaml
+            except Exception as er:
+                pass
+        data = yaml.load(infile, Loader=yaml.FullLoader)
+        print(json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False))
+
+    def j2y(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        infile = None
+        outfile = None
+        if 'f' in argv and os.path.exists(argv['f']):
+            infile = open(argv['f'], 'r')
+        if 'o' in argv:
+            outfile = open(argv['o'], 'w')
+        if infile == None:
+            infile = sys.stdin
+        try:
+            import yaml
+        except Exception as er:
+            try:
+                print('install pyyaml.....')
+                ZbxCommand('pip install pyyaml').run(timeout=120)
+                import yaml
+            except Exception as er:
+                pass
+        data = yaml.load(infile.read(), Loader=yaml.FullLoader)
+        if outfile == None:
+            outfile = sys.stdout
+        yaml.safe_dump(data, outfile)
+
+    def json_val(self, argv):
+        argv = self.util.getopt(sys.argv[1:])
+        data = None
+        sep = ' '
+        quote = ''
+        key = ''
+        ignore_eror = True
+        pretty = True
+        output = 'json'
+        if 'p' in argv:
+            pretty = False
+        if 'v' in argv:
+            ignore_eror = False
+        if 'q' in argv:
+            quote = argv['q']
+        if 's' in argv:
+            sep = argv['s']
+        if 'k' in argv:
+            key = argv['k']
+        if 'o' in argv:
+            output = argv['o']
+        if 'd' in argv:
+            data = json.loads(argv['d'])
+        try:
+            infile = sys.stdin
+            with infile:
+                if data == None:
+                    data = json.loads(infile.read())
+        except Exception as er:
+            data = {}
+            pass
+        ret = []
+
+        def get_json(data, key, output='text', sep=' ', quote='', pretty=False):
+            def parse_dict(data, key):
+                return data.get(key, None)
+
+            def parse_list(data, key):
+                ret = []
+                if re.match(r'^\d+$', key):
+                    return data[int(key)]
+
+                for i in range(0, len(data)):
+                    if isinstance(data[i], dict):
+                        if key == '*':
+                            for j in data[i].keys():
+                                ret.append(data[i].get(j, None))
+                        else:
+                            ret.append(data[i].get(key, None))
+                    elif isinstance(data[i], list):
+                        for j in range(0, len(data[i])):
+                            if key == '*':
+                                ret.append(data[i][j])
+                            else:
+                                ret.append(data[i][j].get(key, None))
+
+                return ret
+
+            def parse(data, key):
+                if key.find(',') != -1:
+                    ks = key.split(',')
+                else:
+                    ks = key.split('.')
+
+                for k in ks:
+                    if isinstance(data, list):
+                        data = parse_list(data, k)
+                        # print(k,data)
+                    elif isinstance(data, dict):
+                        data = parse_dict(data, k)
+                return data
+
+            if key.find('|') != -1:
+                ks = key.split('|')
+                d = {}
+                for key in ks:
+                    v = parse(data, key)
+                    kk = re.split(r'[\.\,]', key)
+                    if len(kk) > 1:
+                        d[kk[len(kk) - 1]] = v
+                    else:
+                        d[key] = v
+                if isinstance(d[list(d.keys())[0]], list):
+                    values = []
+                    _keys = list(d.keys())
+                    if isinstance(d[_keys[0]], list):
+                        for i, v in enumerate(d[_keys[0]]):
+                            _d = {}
+                            for k in _keys:
+                                _d[k] = d[k][i]
+                            values.append(_d)
+                    data = values
+                else:
+                    data = d
+            else:
+                data = parse(data, key)
+
+            if output == 'json':
+                if isinstance(data, dict) or isinstance(data, list):
+                    if pretty:
+                        return json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False)
+                    else:
+                        return json.dumps(data)
+                else:
+                    return data
+
+            if isinstance(data, list):
+                if isinstance(data[0], dict):
+                    if pretty:
+                        return json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False)
+                    else:
+                        return json.dumps(data)
+                ret = []
+                for i in data:
+                    ret.append('%s%s%s' % (quote, str(i), quote))
+                return sep.join(ret)
+            if isinstance(data, dict):
+                if pretty:
+                    return json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False)
+                else:
+                    return json.dumps(data)
+            return data
+
+        if key == '':
+            if pretty:
+                print(json.dumps(data, sort_keys=True, indent=2, ensure_ascii=False))
+            else:
+                print(json.dumps(data))
+            return
+        try:
+            ret = get_json(data, key, output, sep, quote, pretty)
+            if ret == None or ret == '':
+                print('')
+            else:
+                print(ret)
+        except Exception as er:
+            if ignore_eror:
+                print('')
+            else:
+                print('(error)check -d(data) or -k(key)')
+
+    def remote_server(self, module, action, argv, is_log="1"):
+        if isinstance(argv, dict):
+            if not 's' in argv:
+                argv['s'] = self.util.get_hostname()
+            if not 'i' in argv:
+                argv['i'] = self.util.get_one_ip()
+            # if not 'g' in argv:
+            #    argv['g']="Discovered hosts"
+            # if not 't' in argv:
+            #    argv['t']="Meizu-System"
+
+        try:
+            ret = self.util.url_fetch_witherr(server_url + '/%s/%s' % (module, action),
+                                              {'param': json.dumps(argv)})
+            if is_log == '1':
+                argv['kw'] = {}
+                logger.info('remote_server: module:%s action:%s param:%s' % (module, action, json.dumps(argv)))
+        except UnicodeDecodeError as er:
+            try:
+                ret = self.util.url_fetch_witherr(server_url + '/%s/%s' % (module, action),
+                                                  {'param': json.dumps(argv, encoding='gbk')})
+                if is_log == '1':
+                    argv['kw'] = {}
+                    logger.info(
+                        'remote_server with gbk: module:%s action:%s param:%s' % (module, action, json.dumps(argv)))
+            except Exception as er:
+                logger.error('remote_server with gbk' + str(er))
+                ret = str(er)
+        except Exception as er:
+            if is_log == '1':
+                logger.error(
+                    'remote_server' + str(er) + 'module:%s action:%s param:%s' % (module, action, json.dumps(argv)))
+            ret = str(er)
+        return ret
+
+    def color(self, args):
+        argv = self.util.getopt(args)
+        m = ''
+        c = 'green'
+        if 'm' in argv:
+            m = argv['m']
+        if 'c' in argv:
+            c = argv['c']
+        print(self.util.color(m, c))
+
+    def wlog(self, args):
+        self.write_log(args)
+
+    def write_log(self, args):
+        argv = self.util.getopt(args)
+        message = ''
+        level = 'info'
+        if 'm' in argv.keys():
+            message = argv['m']
+        else:
+            result = '(error) -m(message) require'
+            print(result)
+            logger.error(result)
+        if 'l' in argv.keys():
+            level = argv['l']
+        if level == 'error':
+            logger.error(message)
+        elif level == 'warn':
+            logger.warning(message)
+        else:
+            logger.info(message)
+
+    def lshell(self, args):
+        return self.localshell(args)
+
+    def localshell(self, args):
+        argv = self.util.getopt(args)
+        result = ''
+        if 'f' in argv.keys():
+            filename = argv['f']
+        else:
+            result = '(error) -f(filename) require'
+            logger.error(result)
+            print(result)
+            return
+        if not os.path.exists(filename):
+            result = '(error) -f(filename) %s  not found' % (filename)
+            logger.error(result)
+            print(result)
+            return result
+        src = open(filename, 'r').read()
+        lines = re.split(r'\n', src)
+        for line in lines:
+            if line.strip() != '':
+                break;
+        is_python = False
+        argstr = ''
+        if line.find('python') > 0:
+            is_python = True
+        if 'a' in argv.keys():
+            argstr = argv['a']
+        shell_argv = self.util.cmdline_args(argstr)
+        timeout = 60 * 10
+        if 't' in argv.keys():
+            try:
+                timeout = int(argv['t'])
+            except Exception as er:
+                pass
+        if is_python:
+            cmd = ZbxCommand('%s %s %s' % (PYTHON_PATH, filename, " ".join(shell_argv)))
+            result = cmd.run(timeout)
+        elif line.find('bash') > 0:
+            cmd = ZbxCommand('/bin/bash %s %s' % (filename, " ".join(shell_argv)))
+            result = cmd.run(timeout)
+        else:
+            os.system("chmod +x %s" % (filename))
+            cmd = ZbxCommand('%s %s' % (filename, " ".join(shell_argv)))
+            result = cmd.run(timeout)
+        print(result)
+        sys.exit(cmd.return_code)
+
+    def _localshell(self, cmd_str, taskid, kw):
+        try:
+            if len(cmd_str) < 1:
+                return '(error) -f(filename) require', -1
+                # path=tempfile.gettempdir()+os.sep+'zbxcli';
+            filename = ''
+            dir = 'shell'
+            args = self.util.cmdline_args(cmd_str)
+            env = {}
+            for e in args:
+                if e == 'cli':
+                    break
+                if str(e).find("=") != -1:
+                    kv = str(e).split('=')
+                    env[kv[0]] = str(re.sub(r'^"|"$', '', re.sub(r"^'|'$", '', kv[1])))
+            debug = False
+            argv = {}
+            i = 0
+            for v in args:
+                if i + 1 <= len(args):
+                    if v == '-f':
+                        argv['f'] = args[i + 1]
+                    if v == '-d':
+                        argv['d'] = args[i + 1]
+                    if v == '-a':
+                        argv['a'] = args[i + 1]
+                    if v == '-t':
+                        argv['t'] = args[i + 1]
+                if v == '-u':
+                    argv['u'] = True
+                if v == '-x':
+                    argv['x'] = True
+                    debug = True
+                i = i + 1
+
+            result = ''
+            if 'f' in argv.keys():
+                filename = argv['f']
+            else:
+                result = '(error) -f(filename) require'
+                logger.error(result)
+                return result, -1
+            if not os.path.exists(filename):
+                result = '(error) -f(filename) %s  not found' % (filename)
+                logger.error(result)
+                return result, -1
+            src = open(filename, 'r').read()
+            lines = re.split(r'\n', src)
+            for line in lines:
+                if line.strip() != '':
+                    break;
+            is_python = False
+            argstr = ''
+            if line.find('python') > 0:
+                is_python = True
+            if 'a' in argv.keys():
+                argstr = argv['a']
+                if len(argstr) == 36:
+                    try:
+                        params = cli.util.url_fetch(server_url + '/cli/params', {'param': json.dumps({'k': argstr})})
+                        params = json.loads(params)
+                        for k, v in params.items():
+                            env[k] = str(v)
+                    except Exception as er:
+                        logger.error(er)
+            shell_argv = self.util.cmdline_args(argstr)
+            timeout = 60 * 10
+            if 't' in argv.keys():
+                try:
+                    timeout = int(argv['t'])
+                except Exception as er:
+                    pass
+            if is_python:
+                cmd = ZbxCommand('%s %s %s' % (PYTHON_PATH, filename, " ".join(shell_argv)))
+                result = cmd.run(timeout, kw=kw, env=env)
+            elif line.find('bash') > 0:
+                if debug:
+                    cmd = ZbxCommand('/bin/bash -x %s %s' % (filename, " ".join(shell_argv)))
+                else:
+                    cmd = ZbxCommand('/bin/bash %s %s' % (filename, " ".join(shell_argv)))
+                    result = cmd.run(timeout, kw=kw, env=env)
+            else:
+                os.system("chmod +x %s" % (filename))
+                cmd = ZbxCommand('%s %s' % (filename, " ".join(shell_argv)))
+                result = cmd.run(timeout, kw=kw, env=env)
+            return result, cmd.return_code
+        except Exception as er:
+            return str(er), -1
+
+    def _shell(self, cmd_str, taskid, kw):
+        try:
+            if len(cmd_str) < 1:
+                return '(error) -f(filename) require', -1
+
+            # path=tempfile.gettempdir()+os.sep+'zbxcli';
+            filename = ''
+            dir = 'shell'
+            args = self.util.cmdline_args(cmd_str)
+            env = {}
+            for e in args:
+                if e == 'cli':
+                    break
+                if str(e).find("=") != -1:
+                    kv = str(e).split('=')
+                    env[kv[0]] = re.sub(r'^"|"$', '', re.sub(r"^'|'$", '', kv[1]))
+            debug = False
+            argv = {}
+            i = 0
+            for v in args:
+                if i + 1 <= len(args):
+                    if v == '-f':
+                        argv['f'] = args[i + 1]
+                    if v == '-d':
+                        argv['d'] = args[i + 1]
+                    if v == '-a':
+                        argv['a'] = args[i + 1]
+                    if v == '-t':
+                        argv['t'] = args[i + 1]
+                if v == '-u':
+                    argv['u'] = True
+                if v == '-x':
+                    argv['x'] = True
+                i = i + 1
+            if 'f' in argv.keys():
+                filename = argv['f']
+            else:
+                return '(error) -f(filename) require', -1
+            if 'd' in argv.keys():
+                dir = argv['d']
+            else:
+                dir = '/'
+                try:
+                    dir = getpass.getuser()
+                except Exception as er:
+                    pass
+            if 'x' in argv.keys():
+                debug = True
+            path = script_path + os.path.sep + dir
+            # print(path)
+            if not os.path.exists(path):
+                if PLATFORM == 'windows':
+                    self.util.execute('mkdir "%s"' % path)
+                else:
+                    self.util.execute('mkdir -p %s' % path)
+
+            self.util.execute('chmod 777 -R %s' % script_path, timeout=3)
+            fn = path + os.path.sep + filename
+            src = ''
+            is_python = False
+            result = -1
+            if not os.path.exists(fn) or 'u' in argv.keys():
+                try:
+                    src = self.util.url_fetch_witherr(self.entry % 'shell',
+                                                      {'file': filename, 'param': json.dumps(args[1:]), 'dir': dir},
+                                                      timeout=60 * 10)
+
+                    def merge(src):
+                        try:
+                            def build_dir(path):
+                                if not os.path.exists(path):
+                                    self.util.execute('mkdir -p %s' % path)
+
+                            def save_file_content(param):
+                                path = script_path + os.path.sep + param.get('dir', '')
+                                fn = path + os.path.sep + param.get('file', '')
+                                build_dir(path)
+                                src = self.util.url_fetch_witherr(self.entry % 'shell', param, timeout=60 * 10)
+                                if src != '':
+                                    open(fn, 'w').write(src)
+
+                            pat = '^#include\s+-f\s+(?P<filename>[^\s\r\n]+)?\s+-d\s+(?P<dir>[^\s\r\n]+)?|^#include\s+-d\s+(?P<dir2>[^\s\r\n]+)?\s+-f\s+(?P<filename2>[^\s\r\n]+)?'
+                            pat = re.compile(pat, re.MULTILINE)
+                            m = re.findall(pat, src)
+                            flist = []
+                            for i in m:
+                                if i[0] != '':
+                                    flist.append({'file': i[0], 'dir': i[1], 'param': json.dumps(args[1:])})
+                                else:
+                                    flist.append({'file': i[3], 'dir': i[2], 'param': json.dumps(args[1:])})
+                            for i in flist:
+                                save_file_content(i)
+
+                            if len(flist) > 0:
+                                def replace(a):
+                                    try:
+                                        filename = (a.group('filename') or a.group('filename2'))
+                                        dir2 = (a.group('dir') or a.group('dir2'))
+                                        fn = script_path + os.path.sep + dir2 + os.path.sep + filename
+                                        return open(fn, 'r').read()
+                                    except Exception as er:
+                                        logger.error(er)
+                                        logger.error(flist)
+                                        return a.group(0)
+
+                                src = re.sub(pat, replace, src)
+                        except Exception as er:
+                            logger.error(er)
+                        return src
+
+                    src = merge(src)
+
+
+                except Exception as er:
+                    logger.error(er)
+                    logger.error('download error:file:%s param:%s dir:%s' % (filename), json.dumps(args[1:]), dir)
+            if src != '':
+                open(fn, 'w').write(src)
+            else:
+                src = open(fn, 'r').read()
+            self.util.execute('chmod 777 -R %s' % script_path, timeout=3)
+            lines = re.split(r'\n', src)
+            for line in lines:
+                if line.strip() != '':
+                    break;
+            if line.find('python') > 0:
+                is_python = True
+            argstr = ''
+            timeout = 60 * 10
+            if 'a' in argv.keys():
+                argstr = argv['a']
+                if len(argstr) == 36:
+                    try:
+                        params = cli.util.url_fetch(server_url + '/cli/params', {'param': json.dumps({'k': argstr})})
+                        params = json.loads(params)
+                        for k, v in params.items():
+                            env[k] = str(v)
+                    except Exception as er:
+                        logger.error(er)
+            if 't' in argv.keys():
+                try:
+                    timeout = int(argv['t'])
+                except Exception as er:
+                    logger.warn(er)
+            shell_argv = self.util.cmdline_args(argstr)
+            shell_argv = ['"%s"' % (str(x).replace('\\', '\\\\').replace('\"', '\\\"')) for x in shell_argv]
+            cmd = None
+            if is_python:
+                cmd = ZbxCommand('%s %s %s' % (PYTHON_PATH, fn, " ".join(shell_argv)))
+                result = cmd.run(timeout, task_id=taskid, kw=kw, env=env)
+            elif line.find('bash') > 0:
+                if debug:
+                    cmd = ZbxCommand('/bin/bash -x %s %s' % (fn, " ".join(shell_argv)))
+                else:
+                    cmd = ZbxCommand('/bin/bash %s %s' % (fn, " ".join(shell_argv)))
+                result = cmd.run(timeout, task_id=taskid, kw=kw, env=env)
+            else:
+                os.system("chmod +x %s" % (fn))
+                cmd = ZbxCommand('%s %s' % (fn, " ".join(shell_argv)))
+                result = cmd.run(timeout, task_id=taskid, kw=kw, env=env)
+            if cmd != None:
+                return result, cmd.return_code
+            return result, -1
+        except Exception as er:
+            logger.error(er)
+            return str(er), -1
+
+    def shell(self, args):
+        try:
+            if len(args) < 1:
+                print('(error) -f(filename) require')
+                sys.exit(1)
+
+            # path=tempfile.gettempdir()+os.sep+'zbxcli';
+            filename = ''
+            dir = 'shell'
+            # argv= self.util.parse_argv(args)
+            argv = self.util.getopt(args)
+            debug = False
+            if 'f' in argv.keys():
+                filename = argv['f']
+            else:
+                return '(error) -f(filename) require'
+            if 'd' in argv.keys():
+                dir = argv['d']
+            else:
+                dir = '/'
+                try:
+                    dir = getpass.getuser()
+                except Exception as er:
+                    pass
+            if 'x' in argv.keys():
+                debug = True
+            path = script_path + os.path.sep + dir
+            # print(path)
+            if not os.path.exists(path):
+                if PLATFORM == 'windows':
+                    self.util.execute('mkdir "%s"' % path)
+                else:
+                    self.util.execute('mkdir -p %s' % path)
+
+            self.util.execute('chmod 777 -R %s' % script_path, timeout=3)
+            fn = path + os.path.sep + filename
+            src = ''
+            is_python = False
+            result = -1
+            if not os.path.exists(fn) or 'u' in argv.keys():
+                try:
+                    src = self.util.url_fetch_witherr(self.entry % 'shell',
+                                                      {'file': filename, 'param': json.dumps(args[1:]), 'dir': dir},
+                                                      timeout=60 * 10)
+
+                    def merge(src):
+                        try:
+                            def build_dir(path):
+                                if not os.path.exists(path):
+                                    self.util.execute('mkdir -p %s' % path)
+
+                            def save_file_content(param):
+                                path = script_path + os.path.sep + param.get('dir', '')
+                                fn = path + os.path.sep + param.get('file', '')
+                                build_dir(path)
+                                src = self.util.url_fetch_witherr(self.entry % 'shell', param, timeout=60 * 10)
+                                if src != '':
+                                    open(fn, 'w').write(src)
+
+                            pat = '^#include\s+-f\s+(?P<filename>[^\s\r\n]+)?\s+-d\s+(?P<dir>[^\s\r\n]+)?|^#include\s+-d\s+(?P<dir2>[^\s\r\n]+)?\s+-f\s+(?P<filename2>[^\s\r\n]+)?'
+                            pat = re.compile(pat, re.MULTILINE)
+                            m = re.findall(pat, src)
+                            flist = []
+                            for i in m:
+                                if i[0] != '':
+                                    flist.append({'file': i[0], 'dir': i[1], 'param': json.dumps(args[1:])})
+                                else:
+                                    flist.append({'file': i[3], 'dir': i[2], 'param': json.dumps(args[1:])})
+                            for i in flist:
+                                save_file_content(i)
+
+                            if len(flist) > 0:
+                                def replace(a):
+                                    try:
+                                        filename = (a.group('filename') or a.group('filename2'))
+                                        dir2 = (a.group('dir') or a.group('dir2'))
+                                        fn = script_path + os.path.sep + dir2 + os.path.sep + filename
+                                        return open(fn, 'r').read()
+                                    except Exception as er:
+                                        logger.error(er)
+                                        logger.error(flist)
+                                        return a.group(0)
+
+                                src = re.sub(pat, replace, src)
+                        except Exception as er:
+                            logger.error(er)
+                        return src
+
+                    src = merge(src)
+
+
+                except Exception as er:
+                    logger.error(er)
+                    logger.error('download error:file:%s param:%s dir:%s' % (filename), json.dumps(args[1:]), dir)
+            if src != '':
+                open(fn, 'w').write(src)
+            else:
+                src = open(fn, 'r').read()
+            self.util.execute('chmod 777 -R %s' % script_path, timeout=3)
+            lines = re.split(r'\n', src)
+            for line in lines:
+                if line.strip() != '':
+                    break;
+            if line.find('python') > 0:
+                is_python = True
+            argstr = ''
+            timeout = 60 * 10
+            if 'a' in argv.keys():
+                argstr = argv['a']
+            if 't' in argv.keys():
+                try:
+                    timeout = int(argv['t'])
+                except Exception as er:
+                    pass
+            shell_argv = self.util.cmdline_args(argstr)
+            shell_argv = ['"%s"' % (str(x).replace('\\', '\\\\').replace('\"', '\\\"')) for x in shell_argv]
+            cmd = None
+            if is_python:
+                cmd = ZbxCommand('%s %s %s' % (PYTHON_PATH, fn, " ".join(shell_argv)))
+                result = cmd.run(timeout)
+            elif line.find('bash') > 0:
+                if debug:
+                    cmd = ZbxCommand('/bin/bash -x %s %s' % (fn, " ".join(shell_argv)))
+                else:
+                    cmd = ZbxCommand('/bin/bash %s %s' % (fn, " ".join(shell_argv)))
+                result = cmd.run(timeout)
+            else:
+                os.system("chmod +x %s" % (fn))
+                cmd = ZbxCommand('%s %s' % (fn, " ".join(shell_argv)))
+                result = cmd.run(timeout)
+            print(result)
+
+            if cmd != None:
+                exit(cmd.return_code)
+        except Exception as er:
+            logger.error(er)
+
+
+class ZbxDaemon(Daemon):
+
+    def __getattr__(self, attr):
+        if hasattr(self, 'zbxcli'):
+            if hasattr(self.zbxcli, attr):
+                return getattr(self.zbxcli, attr)
+        return None
+
+    def get_etcd(self):
+        try:
+            now = time.time()
+            if now - self.update_time > 600:
+                print("=== get etcd")
+                # self.etcd_conf =  json.loads(self.remote_server('cli','getetcd',{}) )
+                # print(self.etcd_conf)
+                # self.etcd_list=self.etcd_conf['server']
+                # self.etcd_prefix=self.etcd_conf['prefix']
+                if not isinstance(self.etcd_list, list):
+                    raise Exception("get etcd list error")
+                for host in self.etcd_list:
+                    print(self.util.url_fetch_witherr("%s%s/heartbeat" % (host, self.etcd_prefix),
+                                                      data={'ttl': 60, 'value': 'heartbeat'}, httpCmd='PUT'))
+                    print(self.util.url_fetch_witherr("%s%s/servers" % (host, self.etcd_prefix),
+                                                      data={'ttl': 60, 'value': 'servers'}, httpCmd='PUT'))
+                self.update_time = now
+        except Exception as er:
+            print('get_etcd:' + str(er))
+            time.sleep(3)
+            # return self.get_etcd()
+
+    def status2(self):
+        try:
+            filename = 'heartbeat'
+            file_path = script_path + os.path.sep + '.' + filename
+            if not os.path.exists(script_path):
+                self.util.execute('mkdir -p %s' % script_path)
+            if self.shellstr != '':
+                open(file_path, 'w').write(self.shellstr)
+                os.chmod(file_path, 755)
+            if not os.path.exists(file_path):
+                return json.dumps({})
+            cmd = ZbxCommand('%s %s' % (PYTHON_PATH, file_path), is_log=False)
+            ret = cmd.run()
+            return json.dumps(json.loads(ret))
+        except Exception as er:
+            if global_debug:
+                print('status2' + str(er))
+            return '{}'
+
+    def heartbeat2server(self):
+        try:
+            ips = ",".join(self.util.get_all_ip_list())
+            # ret = self.zbxcli.default(default_module,'heartbeat',['--uuid',self.util.get_product_uuid(),
+            #                                                       '--ips',ips,'--status', self.status(),'--platform',
+            #                                                  platform.system().lower(),'--hostname',self.util.get_hostname() ])
+            python_version = 'unknown'
+            try:
+                python_version = platform.python_version()
+            except Exception as er:
+                pass
+            data = {'uuid': self.util.get_product_uuid(), 'ips': ips, 'status': self.status2(),
+                    'platform': platform.system().lower(), 'hostname': self.util.get_hostname(),
+                    'python_version': python_version, 'cli_version': CLI_VERSION,
+                    'envs': json.dumps(self.util.get_envs())}
+            ret = self.util.url_fetch(server_url + '/%s/%s' % (module, 'heartbeat'), {'param': json.dumps(data)})
+
+            objs = json.loads(ret)
+
+            self.salt = objs['salt']
+            self.etcd_conf = objs['etcd']
+            if 'shell' in objs.keys():
+                self.shellstr = objs['shell']
+
+                # print(self.util.execute(self.shellstr))
+
+            self.etcd_list = objs['etcd']['server']
+            self.etcd_prefix = objs['etcd']['prefix']
+            self.etcd_user = objs['etcd'].get('user', 'guest')
+            self.etcd_password = objs['etcd'].get('password', 'guest')
+            self.etch_basic_auth = self.util.get_basic_auth(self.etcd_user, self.etcd_password)
+            # print('salt',self.salt)
+            logger.info("heartbeat2server %s OK" % (server_url))
+            return 'ok'
+        except Exception as er:
+            print('heartbeat2server:\t' + str(er))
+            time.sleep(3)
+            logger.error('heartbeat2server' + str(er) + str(ret))
+            return 'fail'
+
+    def heartbeat(self):
+        try:
+            logger.info("=== heartbeat start")
+            ip = self.util.get_product_uuid()
+            for host in self.etcd_list:
+                # print("heartbeat:  %s%s/heartbeat/%s" % (host,self.etcd_prefix,ip))
+                ips = ",".join(self.util.get_all_ip_list())
+                try:
+                    html = ''
+                    html = self.util.url_fetch_witherr("%s%s/heartbeat/%s" % (host, self.etcd_prefix, ip),
+                                                       data={'ttl': 60 * 5, 'value': ips}, httpCmd='PUT')
+                    logger.info("heartbeat2etcd OK")
+                    self.has_heartbeat_error = False
+                except Exception as her:
+                    pass
+                if html != "":
+                    break
+            logger.info("=== heartbeata end")
+        except Exception as er:
+
+            time.sleep(3)
+            print('heartbeat:\t' + str(er))
+            if not self.has_heartbeat_error:
+                logger.error('heartbeat error:' + str(er))
+                self.has_heartbeat_error = True
+
+    def watch_commmand2(self, wait_block=True):
+        try:
+            ip = self.util.get_product_uuid()
+            # print("watch_commmand",ip,self.etcd_list)
+            for host in self.etcd_list:
+                content = ''
+                header = {'Authorization': self.etch_basic_auth}
+                try:
+                    # content = self.util.url_fetch_witherr("%s%s/servers/%s?recursive=true" % (host,self.etcd_prefix,ip),header=header,timeout = 10 )
+                    content = LongHttp.request("%s%s/servers/%s?recursive=true" % (host, self.etcd_prefix, ip), {},
+                                               headers=header)
+
+                except Exception as er:
+                    time.sleep(5)
+                    self.heartbeat2server()
+                    pass
+                if content != '':
+                    rjson = json.loads(content)
+                    if rjson['node'].get('nodes'):
+                        self.queue.put({'ip': ip, 'content': content, 'host': host})
+                        # self.feedback_result(ip,host,content)
+                        break
+                if wait_block:
+                    # self.util.url_fetch("%s%s/servers/%s?wait=true&recursive=true" % (host,self.etcd_prefix,ip),header=header,timeout = 20+ random.randint(1,10) )
+                    LongHttp.request("%s%s/servers/%s?wait=true&recursive=true" % (host, self.etcd_prefix, ip),
+                                     headers=header, timeout=20 + random.randint(1, 10))
+                    try:
+                        # content = self.util.url_fetch_witherr("%s%s/servers/%s?recursive=true" % (host,self.etcd_prefix,ip),header=header,timeout = 10 )
+                        content = LongHttp.request("%s%s/servers/%s?recursive=true" % (host, self.etcd_prefix, ip),
+                                                   headers=header, timeout=10)
+                    except Exception as her:
+                        # print(her)
+                        pass
+                    # print("content   "+content)
+                    if content != "":
+                        self.queue.put({'ip': ip, 'content': content, 'host': host})
+                        # self.feedback_result(ip,host,content)
+                        break
+        except Exception as er:
+            print('watch_commmand:\t' + str(er))
+            time.sleep(3)
+            # logger.error('watch_commmand error:'+str(er))
+
+    def watch_commmand(self, wait_block=True):
+        content = ''
+        try:
+            ip = self.util.get_product_uuid()
+            # print("watch_commmand",ip,self.etcd_list)
+            for host in self.etcd_list:
+                content = ''
+                header = {'Authorization': self.etch_basic_auth}
+                try:
+                    content = self.util.url_fetch_witherr(
+                        "%s%s/servers/%s?recursive=true" % (host, self.etcd_prefix, ip), header=header, timeout=10)
+                except Exception as er:
+                    time.sleep(5)
+                    self.heartbeat2server()
+                    pass
+                if content != '':
+                    rjson = json.loads(content)
+                    if rjson['node'].get('nodes'):
+                        self.queue.put({'ip': ip, 'content': content, 'host': host})
+                        # self.feedback_result(ip,host,content)
+                        break
+                if wait_block:
+                    self.util.url_fetch("%s%s/servers/%s?wait=true&recursive=true" % (host, self.etcd_prefix, ip),
+                                        header=header, timeout=20 + random.randint(1, 10))
+                    try:
+                        content = self.util.url_fetch_witherr(
+                            "%s%s/servers/%s?recursive=true" % (host, self.etcd_prefix, ip), header=header, timeout=10)
+                    except Exception as her:
+                        # print(her)
+                        pass
+                    # print("content   "+content)
+                    if content != "":
+                        rjson = json.loads(content)
+                        if rjson['node'].get('nodes'):
+                            self.queue.put({'ip': ip, 'content': content, 'host': host})
+                        # self.feedback_result(ip,host,content)
+                        break
+        except Exception as er:
+            print('watch_commmand:\t' + str(er))
+            print(content)
+            time.sleep(3)
+            # logger.error('watch_commmand error:'+str(er))
+
+    def delete_cmd(self, host, key):
+        try:
+            url = "%s%s?recursive=true" % (host, key)
+            # self.util.url_fetch(url,httpCmd= 'DELETE' )
+            data = {'host': host, 'key': key}
+            self.util.url_fetch(server_url + '/%s/%s' % (module, 'del_etcd_key'), data)
+        except Exception as er:
+            print('delete_cmd:\t' + (er))
+
+    def consumer(self):
+        cnt = 0
+        while True:
+            try:
+                if self.queue.qsize() > 0:
+                    cnt = 0
+                    data = self.queue.get()
+                    # try:
+                    #     self.feedback_result2(data['ip'],data['host'],data['content'])
+                    # except Exception as er:
+                    #     self.feedback_result(data['ip'],data['host'],data['content'])
+
+                    self.feedback_result2(data['ip'], data['host'], data['content'])
+                else:
+                    interval = 0.1
+                    time.sleep(interval)
+                    cnt = cnt + 1
+                    if cnt * interval > 10:
+                        cnt = 0
+                        self.watch_commmand(wait_block=False)
+            except Exception as er:
+                logger.error(er)
+                print(er)
+
+    def feedback_result(self, ip, host, content):
+        if content == None or content == '':
+            return
+        try:
+            # logger.info("process cmd")
+            if content == "Not Found":
+                print("no found key")
+                return
+            rjson = json.loads(content)
+            if not rjson['node'].get('dir', False):
+                url = "%s/%s?recursive=true" % (host, rjson['node']['key'])
+                print("feedback_result" + url)
+                self.util.url_fetch(url, httpCmd='DELETE')
+                logger.info("publish is no dir")
+                return
+
+            if not rjson['node'].get('nodes'):
+                # logger.info("no found command")
+                return
+
+            logger.info("process cmd")
+            key = ''
+            data = {}
+            for cNode in rjson['node']['nodes']:
+                key = cNode['key']
+                createdIndex = cNode['createdIndex']
+                if createdIndex in self.index:
+                    # self.delete_cmd(host, key)
+                    continue
+                else:
+                    self.index.append(createdIndex)
+                if len(self.index) > 5000:
+                    self.index = self.index[-4800:]
+
+                # try:
+                #     cNode=json.loads(cNode['value'])
+                # except Exception as er:
+                #     pass
+                try:
+                    # cNode=json.loads(cNode['value'])
+                    cmd_uuid = str(cNode['value'])
+                except Exception as er:
+                    logger.error('json error lost command : ' + str(cNode))
+                    self.delete_cmd(host, key)
+                    print('json error lost command : ' + str(er))
+                    continue
+                # cmd=cNode['cmd']
+                # if PY2:
+                #     cmd = cmd.encode('utf-8')
+                # md5 = str(cNode['md5'])
+                argv = {'uuid': cmd_uuid, 'index': createdIndex, 'host': host, 'key': key}
+                ret = self.util.url_fetch_witherr(server_url + '/%s/%s' % (module, 'get_cmd'),
+                                                  {'param': json.dumps(argv)}, timeout=10)
+                if ret == '' or ret == '{}' or len(json.loads(ret)) == 0:
+                    self.delete_cmd(host, key)
+                    continue
+                data = json.loads(ret)
+                if PY2:
+                    cmd = data['cmd'].encode('utf-8')
+                if PY3:
+                    cmd = data['cmd']
+                md5 = str(data['md5'])
+
+                url_success = data.get('url_success', '')
+                url_error = data.get('url_error', '')
+                url = data.get('url', '')
+                feedback = data.get('feedback', '1')
+                _ip = data.get('ip', '')
+                log_to_file = data.get('log_to_file', '1')
+
+                if 'timeout' in data.keys():
+                    timeout = float(data['timeout'])
+                else:
+                    timeout = 30
+                if md5 == self.util.md5(cmd + str(self.salt)):
+
+                    # self.keys.append(key)
+                    self.delete_cmd(host, key)
+
+                    def tmp(cmd, cmd_uuid, createdIndex, url_success, url_error, url, feedback, _ip, kw=None):
+                        if global_debug:
+                            print('cmd:', cmd)
+                        if log_to_file == '0':
+                            zbxcmd = ZbxCommand(cmd, is_log=False, task_id=cmd_uuid)
+                        else:
+                            zbxcmd = ZbxCommand(cmd, is_log=True, task_id=cmd_uuid)
+                        result = zbxcmd.run(float(timeout), task_id=cmd_uuid, url_success=url_success,
+                                            url_error=url_error, url=url, ip=_ip, kw=kw)
+                        try:
+                            result = result.decode('utf-8')
+                        except Exception as utfer:
+                            try:
+                                result = result.decode('gbk')
+                            except Exception as gbker:
+                                try:
+                                    result = result.decode('utf-8', 'ignore')
+                                except Exception as ler:
+                                    pass
+                        message = {'ip': ip, 'cmd': cmd, 'result': result, 'index': createdIndex, 'task_id': cmd_uuid,
+                                   'error': zbxcmd.message_error, 'return_code': zbxcmd.return_code,
+                                   'success': zbxcmd.messge_success,
+                                   "i": _ip, 'kw': data}
+                        # print(message)
+
+                        zbxcmd.clean_log()
+
+                        if feedback == '1':
+                            self.remote_server('cli', 'feedback_result', message, log_to_file)
+                        # print(json.dumps(message))
+
+                    threading.Thread(target=tmp, args=(
+                        cmd, cmd_uuid, createdIndex, url_success, url_error, url, feedback, _ip, data,)).start()
+                else:
+                    print('salt error', self.salt)
+                    logger.error('miss command %s ' % (cmd))
+                    self.delete_cmd(host, key)
+                    message = {'ip': ip, 'cmd': cmd, 'result': 'valid salt', 'index': createdIndex}
+                    self.remote_server('cli', 'feedback_result', message, log_to_file)
+
+        except Exception as e:
+            try:
+                self.delete_cmd(host, key)
+                logger.error('lost command : ' + str(data))
+            except Exception as er:
+                pass
+            logger.error('feedback_result error:' + str(e))
+            print('feedback_result:\t' + str(e))
+
+    def feedback_result2(self, ip, host, content):
+        if content == None or content == '':
+            return
+        try:
+            # logger.info("process cmd")
+            if content == "Not Found":
+                print("no found key")
+                return
+            rjson = json.loads(content)
+            if not rjson['node'].get('dir', False):
+                url = "%s/%s?recursive=true" % (host, rjson['node']['key'])
+                print("feedback_result2" + url)
+                self.util.url_fetch(url, httpCmd='DELETE')
+                logger.info("publish is no dir")
+                return
+
+            if not rjson['node'].get('nodes'):
+                # logger.info("no found command")
+                return
+
+            key = ''
+            for cNode in rjson['node']['nodes']:
+                key = cNode['key']
+                createdIndex = cNode['createdIndex']
+                if createdIndex in self.index:
+                    # self.delete_cmd(host, key)
+                    continue
+                else:
+                    self.index.append(createdIndex)
+                if len(self.index) > 5000:
+                    self.index = self.index[-4800:]
+                try:
+                    cNode = json.loads(cNode['value'])
+                except Exception as er:
+                    logger.error('json error lost command : ' + str(cNode))
+                    self.delete_cmd(host, key)
+                    print('json error lost command : ' + str(er))
+                    continue
+                cmd = cNode['cmd']
+                logger.info("process cmd")
+                if PY2:
+                    cmd = cmd.encode('utf-8')
+                md5 = str(cNode['md5'])
+                url_success = cNode.get('url_success', '')
+                url_error = cNode.get('url_error', '')
+                url = cNode.get('url', '')
+                cmd_uuid = cNode.get('task_id', '')
+                feedback = cNode.get('feedback', '1')
+                _ip = cNode.get('ip', '')
+                log_to_file = cNode.get('log_to_file', '1')
+
+                if 'timeout' in cNode.keys():
+                    timeout = float(cNode['timeout'])
+                else:
+                    timeout = 30
+                if md5 == self.util.md5(cmd + str(self.salt)):
+
+                    # self.keys.append(key)
+                    self.delete_cmd(host, key)
+
+                    def tmp(cmd, cmd_uuid, createdIndex, url_success, url_error, url, feedback, _ip, kw=None):
+                        print('cmd:', cmd)
+                        # result = ZbxCommand(cmd,is_log=True).run(float(timeout))
+                        if cmd.strip() == 'killalltask':
+                            zbxcmd = ZbxCommand(cmd, is_log=log_to_file)
+                            for k, v in PROCESS.items():
+                                if hasattr(v, 'args'):
+                                    logger.warn('kill task: %s cmd:%s' % (k, v.args))
+                                else:
+                                    logger.warn('kill task: %s' % (k))
+                                logger.warn('kill task: %s cmd:%s' % (k, v.args))
+                                PROCESS[k].send_signal(signal.SIGKILL)
+                            PROCESS.clear()
+                            zbxcmd.return_code = 0
+                            result = 'has send signal to kill all task'
+                        elif re.match(r'kill\s+[\w\-]{36}\s*', cmd):
+                            zbxcmd = ZbxCommand(cmd, is_log=log_to_file)
+                            task_id = re.split(r'\s+', cmd)[1]
+                            if task_id in PROCESS.keys():
+                                if hasattr(PROCESS[task_id], 'args'):
+                                    logger.warn('kill task: %s cmd:%s' % (task_id, PROCESS[task_id].args))
+                                else:
+                                    logger.warn('kill task: %s' % (task_id))
+                                PROCESS[task_id].send_signal(signal.SIGKILL)
+                                del PROCESS[task_id]
+                                result = 'has send signal to kill "%s"' % (task_id)
+                                zbxcmd.return_code = 0
+                            else:
+                                result = 'task "%s" not found' % (task_id)
+                                zbxcmd.return_code = -1
+                        else:
+                            if log_to_file == '0':
+                                zbxcmd = ZbxCommand(cmd, is_log=log_to_file, task_id=cmd_uuid)
+                            else:
+                                zbxcmd = ZbxCommand(cmd, is_log=log_to_file, task_id=cmd_uuid)
+                            result = zbxcmd.run(float(timeout), task_id=cmd_uuid, url_success=url_success,
+                                                url_error=url_error, url=url, ip=_ip, kw=kw)
+                        try:
+                            result = result.decode('utf-8')
+                        except Exception as utfer:
+                            try:
+                                result = result.decode('gbk')
+                            except Exception as gbker:
+                                try:
+                                    result = result.decode('utf-8', 'ignore')
+                                except Exception as ler:
+                                    pass
+                        # message = {'ip':ip, 'cmd':cmd, 'result':result,'index':createdIndex,'task_id':cmd_uuid}
+                        message = {'ip': ip, 'cmd': cmd, 'result': result, 'index': createdIndex, 'task_id': cmd_uuid,
+                                   'error': zbxcmd.message_error, 'return_code': zbxcmd.return_code,
+                                   'success': zbxcmd.messge_success, 'i': _ip, 'kw': kw}
+                        # print(message)
+                        zbxcmd.clean_log()
+                        # print(type(message))
+                        if feedback == '1':
+                            self.remote_server('cli', 'feedback_result', message, log_to_file)
+                        # print(json.dumps(message))
+
+                    # threading.Thread(target=tmp).start()
+                    threading.Thread(target=tmp, args=(
+                        cmd, cmd_uuid, createdIndex, url_success, url_error, url, feedback, _ip, cNode,)).start()
+                else:
+                    print('salt error', self.salt)
+                    logger.error('miss command %s ' % (cmd))
+                    self.delete_cmd(host, key)
+                    message = {'ip': ip, 'cmd': cmd, 'result': 'valid salt', 'index': createdIndex}
+                    self.remote_server('cli', 'feedback_result', message, log_to_file)
+
+        except Exception as e:
+            try:
+                self.delete_cmd(host, key)
+                logger.error('lost command : ' + str(cNode))
+            except Exception as er:
+                pass
+            logger.error('feedback_result error:' + str(e))
+            print(e)
+
+    def check(self):
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+
+            def get_info(p, methods):
+                val = 0
+                for m in methods:
+                    if hasattr(process, m):
+                        val = getattr(process, m)()
+                        return val
+
+            mem = get_info(process, ['memory_info', 'get_memory_info'])
+            # cpu = get_info(process, ['cpu_percent', 'get_cpu_percent'])
+            if mem.rss / 1024 / 1024 > 800:
+                logger.warning('cli client memory>800M ,exit')
+                process.terminate()
+        except ImportError as er:
+            if random.random() < 0.1:
+                ZbxCommand('yum install -y python-psutil').run()
+                ZbxCommand('pip install psutil').run()
+            logger.error(er)
+        except Exception as er:
+            pass
+
+    def sync_conf(self):
+        try:
+            self.heartbeat2server()
+        except Exception as er:
+            pass
+        while True:
+            try:
+                # self.get_etcd()
+                ok = self.heartbeat2server()
+                time.sleep(2)
+                self.check()
+                ## todo
+                ##self.heartbeat() remove to server
+                if ok != 'ok':
+                    time.sleep(5)
+                elif not global_debug:
+                    time.sleep(60 * 2 + random.randint(1, 60 * 2))
+                else:
+                    time.sleep(10)
+            except Exception as er:
+                logger.error('sync_conf error:' + str(er))
+                pass
+
+    '''
+    func initReport() {
+
+	Report := func() {
+		defer func() {
+			if re := recover(); re != nil {
+				buffer := debug.Stack()
+				log.Error(string(buffer))
+				log.Flush()
+			}
+		}()
+		ip := cli.util.GetLocalIP()
+		uuid := cli.util.GetProductUUID()
+		memInfo, _ := mem.VirtualMemory()
+		loadInfo, _ := load.Avg()
+		hostInfo, _ := host.Info()
+		cpuInfo, _ := cpu.Info()
+		partitions, err := disk.Partitions(false)
+		var diskInfo []interface{}
+		if err != nil {
+			log.Error(err)
+		} else {
+			for _, p := range partitions {
+				_ = p
+				info, err := disk.Usage(p.Mountpoint)
+				if err == nil {
+					diskInfo = append(diskInfo, info)
+				}
+			}
+		}
+		extend := cli.util.ReadFile("/var/lib/cli/extend.json")
+		infos := make(map[string]interface{})
+		infos["memInfo"] = memInfo
+		infos["cpuInfo"] = cpuInfo
+		infos["hostInfo"] = hostInfo
+		infos["loadInfo"] = loadInfo
+		infos["diskInfo"] = diskInfo
+		infos["ip"] = ip
+		var obj interface{}
+		if err := json.Unmarshal([]byte(extend), &obj); err != nil {
+			infos["extend"] = extend
+		} else {
+			infos["extend"] = obj
+		}
+		infos["utime"] = time.Now().Format("2006-01-02 15:04:05")
+		infos["uuid"] = uuid
+		data := cli.util.JsonEncodePretty(infos)
+		params := make(map[string]string)
+		params["data"] = data
+		params["_auto_"] = "1"
+		params["uuid"] = uuid
+
+		cli.util.Request(cli.conf.EnterURL+"/cli/node", params)
+	}
+
+	go func() {
+		for {
+
+			Report()
+			time.Sleep(time.Duration(cli.util.RandInt(60, 120)) * time.Second)
+		}
+	}()
+
+}'''
+
+    def init_report(self):
+        while True:
+            try:
+                import psutil
+                data = {'memInfo': psutil.virtual_memory(), 'cpuInfo': {}, 'loadInfo': psutil.getloadavg(),
+                        'hostInfo': {}, 'diskInfo': [], 'extend': {}, 'ip': util.get_host_ip(), 'uuid': util.get_product_uuid(),}
+                partitions = psutil.disk_partitions()
+                diskInfo = []
+                for p in partitions:
+                    diskInfo.append(psutil.disk_usage(p.mountpoint))
+                data['diskInfo'] = diskInfo
+
+                self.report()
+                time.sleep(2)
+            except Exception as er:
+                time.sleep(60)
+                logger.error(er)
+
+
+def run(self):
+    self.queue = queue.Queue(50)
+    self.index = []
+    self.update_time = time.time() - 800
+    self.has_heartbeat_error = False
+    sync = threading.Thread(target=self.sync_conf)
+    sync.setDaemon(True)
+    sync.start()
+
+    tc = threading.Thread(target=self.consumer)
+    tc.setDaemon(True)
+    tc.start()
+
+    # rp = threading.Thread(target=self.init_report)
+    # rp.setDaemon(True)
+    # rp.start()
+
+    time.sleep(3)
+
+    while True:
+        try:
+            # self.get_etcd()
+            # self.heartbeat()
+            self.watch_commmand()
+            time.sleep(0.5)
+        except Exception as e:
+            pass
+            time.sleep(5)
+
+
+if __name__ == '__main__':
+
+    if os.path.isfile(configfile):
+        with open(configfile) as f:
+            try:
+                for l in f.read().strip().split("\n"):
+                    k, v = l.split('=', 1)
+                    if k.strip() == 'server_url' and v != '':
+                        server_url = v.strip()
+                    if k.strip() == 'pidfile' and v != '':
+                        pidfile = v.strip()
+            except Exception as er:
+                logger.error(er)
+                pass
+
+    server = os.environ.get('CLI_SERVER', server_url)
+    default_module = os.environ.get('CLI_MODULE', default_module)
+
+    parts = urlparse(server)
+    server_url = parts.scheme + '://' + parts.netloc
+    if parts.path.strip() != '':
+        default_module = parts.path[1:]
+
+    CLI_DEBUG = os.environ.get('CLI_DEBUG', '0')
+    if CLI_DEBUG != '0':
+        global_debug = True
+    module = default_module
+    action = 'help'
+    cli = ZbxCli(default_module)
+    util = ZbxCommon()
+    data = util.getopt(sys.argv[1:])
+
+    try:
+        def quit(signum, frame):
+            logger.warning("ctrl+c")
+            sys.exit(1)
+
+
+        signal.signal(signal.SIGINT, quit)
+        signal.signal(signal.SIGTERM, quit)
+    except Exception as er:
+        logger.error(er)
+
+    if data['__ctrl__'] == '':
+        if data['__func__'] == '':
+            action = 'help'
+        else:
+            action = data['__func__']
+    else:
+        module = data['__ctrl__']
+        action = data['__func__']
+    try:
+        if hasattr(cli, action):
+            getattr(cli, action)(sys.argv[2:])
+        else:
+            cli.default(module, action, sys.argv[1:])
+    except Exception as er:
+        logger.error(er)

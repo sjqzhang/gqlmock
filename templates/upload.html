@@ -1,0 +1,28 @@
+<!doctype html>
+<title>Python Flask Multiple Files Upload Example</title>
+<h2>Select file(s) to upload</h2>
+<p>
+    {% with messages = get_flashed_messages() %}
+    {% if messages %}
+<ul class=flashes>
+    {% for message in messages %}
+    <li>{{ message }}</li>
+    {% endfor %}
+</ul>
+{% endif %}
+{% endwith %}
+</p>
+<form method="post" action="/" enctype="multipart/form-data">
+    <dl>
+        <p>
+            <span>graphqls文件</span> <input type="file" name="files[]" multiple="true" autocomplete="off" required
+                                           title="请选择项目的graphqls文件，需多选">
+        </p>
+        <p>
+            <span>项目名称</span> <input type="text" name="project" value="pjm" title="项目名称">
+        </p>
+    </dl>
+    <p>
+        <input type="submit" value="Submit">
+    </p>
+</form>
