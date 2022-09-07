@@ -4,7 +4,7 @@ import os
 import time
 
 import requests
-from flask import Flask, flash, request, redirect, render_template
+from flask import Flask, flash, request, redirect, render_template,Response
 from ops_channel import cli
 from werkzeug.utils import secure_filename
 
@@ -48,7 +48,7 @@ def consumer():
         go run server.go
         '''
         # print(cli.execute_shell(shell))
-        t = threading.Thread(target=cli.execute_shell, args=(shell,20,))
+        t = threading.Thread(target=cli.execute_shell, args=(shell,60,))
         t.setDaemon(True)
         t.start()
         timeout = 0
@@ -107,7 +107,7 @@ def upload_file():
                     filename = secure_filename(file.filename)
                     schemas.append(file.read().decode('utf-8'))
                 # file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-        flash('File(s) successfully uploaded')
+        # flash('File(s) successfully uploaded')
         Q.put({'project': request.form.get('project'), 'schemas': "\n".join(schemas)})
         return redirect('/')
 
