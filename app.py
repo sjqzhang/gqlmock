@@ -87,8 +87,7 @@ def allowed_file(filename):
 
 @app.route('/')
 def upload_form():
-    root=url_for('upload_form')
-    return render_template('upload.html',root=root)
+    return render_template('upload.html',url_root=request.url_root)
 
 
 @app.route('/schema')

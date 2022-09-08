@@ -59,12 +59,12 @@
 # 可以在代码中使用这样的方式获取上传的文件，无需使用浏览器
 import os,requests
 def upload():
-    dir='/Users/junqiang.zhang/repo/go/dms-project/graph/schema'  #存在graphqls文件的目录
+    dir='./graph/schema'  #存在graphqls文件的目录
     files = []
     for i in os.listdir(dir):
         fn= os.path.join(dir, i)
         files.append(('files[]', open(fn, 'rb')))
-    requests.post('http://127.0.0.1:5000/',files=files)
+    requests.post('{{ url_root }}',files=files)
 upload()
 
 
