@@ -83,7 +83,7 @@ def get_schema():
     project = request.args.get('project')
     data= GRAPHQLS.get(project)
     if data is not None:
-        return data['schemas']
+        return Response(data['schemas'], mimetype='text/plain')
     else:
         return 'not found'
 
