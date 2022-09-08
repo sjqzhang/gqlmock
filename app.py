@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
+import json
 import os
 import time
 
@@ -33,6 +34,12 @@ QUERY={
 }
 
 
+def load_schema():
+    if os.path.exists(os.path.join('graph/schema.json')):
+        with open(os.path.join('graph/schema.json'),'r') as fp:
+            GRAPHQLS.update(json.loads(fp.read()))
+load_schema()
+
 def consumer():
     while True:
         try:
@@ -54,16 +61,22 @@ def consumer():
             t.start()
             timeout = 0
             while True:
-                timeout = timeout + 1
-                time.sleep(1)
-                if cli.check_port(port=8080):
-                    data = requests.post('http://127.0.0.1:8080/query', json=QUERY).json()
-                    GRAPHQLS[item['project']] = {'data': data, 'schemas': item['schemas']}
-                    requests.get('http://127.0.0.1:8080/exit')
-                    break
-                else:
-                    if timeout > 30:
+                try:
+                    timeout = timeout + 1
+                    time.sleep(1)
+                    if cli.check_port(port=8080):
+                        data = requests.post('http://127.0.0.1:8080/query', json=QUERY).json()
+                        GRAPHQLS[item['project']] = {'data': data, 'schemas': item['schemas']}
+                        with open(os.path.join('graph/schema.json'),'w') as fp:
+                            fp.write(json.dumps(GRAPHQLS))
+                        requests.get('http://127.0.0.1:8080/exit')
                         break
+                    else:
+                        if timeout > 30:
+                            break
+                except Exception as e:
+                    print('error',e)
+                    break
         except Exception as er:
             print(er)
             time.sleep(1)
@@ -121,4 +134,4 @@ if __name__ == "__main__":
     t = threading.Thread(target=consumer)
     t.setDaemon(True)
     t.start()
-    app.run(host='0.0.0.0')
+    app.run(host='0.0.0.0',debug=True)
