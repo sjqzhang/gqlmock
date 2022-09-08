@@ -5,6 +5,8 @@ RUN cd /app && git clone https://github.com/99designs/gqlgen.git && cd gqlgen &&
 
 COPY ./ /app/gqlmock
 
+RUN go mod download
+
 RUN cp /app/gqlmock/cli /bin/cli && chmod +x /bin/cli && ln /usr/bin/python3 /usr/bin/python
 
 

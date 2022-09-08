@@ -4,7 +4,7 @@ import os
 import time
 
 import requests
-from flask import Flask, flash, request, redirect, render_template,Response
+from flask import Flask, flash, request, redirect, render_template,Response,url_for
 from ops_channel import cli
 from werkzeug.utils import secure_filename
 
@@ -35,34 +35,38 @@ QUERY={
 
 def consumer():
     while True:
-        item = Q.get()
-        if item is None:
-            time.sleep(1)
-            continue
-        with open('./graph/schema.graphqls', 'w') as f:
-            f.write(item['schemas'])
-        shell = b'''
-        cd /app/gqlmock
-        rm -rf ./graph/schema.resolvers.go 
-        gqlgen
-        go run server.go
-        '''
-        # print(cli.execute_shell(shell))
-        t = threading.Thread(target=cli.execute_shell, args=(shell,60,))
-        t.setDaemon(True)
-        t.start()
-        timeout = 0
-        while True:
-            timeout = timeout + 1
-            time.sleep(1)
-            if cli.check_port(port=8080):
-                data = requests.post('http://127.0.0.1:8080/query', json=QUERY).json()
-                GRAPHQLS[item['project']] = {'data': data, 'schemas': item['schemas']}
-                requests.get('http://127.0.0.1:8080/exit')
-            else:
-                if timeout > 30:
+        try:
+            item = Q.get()
+            if item is None:
+                time.sleep(1)
+                continue
+            with open('./graph/schema.graphqls', 'w') as f:
+                f.write(item['schemas'])
+            shell = b'''
+            cd /app/gqlmock
+            rm -rf ./graph/schema.resolvers.go 
+            gqlgen
+            go run server.go
+            '''
+            # print(cli.execute_shell(shell))
+            t = threading.Thread(target=cli.execute_shell, args=(shell,60,))
+            t.setDaemon(True)
+            t.start()
+            timeout = 0
+            while True:
+                timeout = timeout + 1
+                time.sleep(1)
+                if cli.check_port(port=8080):
+                    data = requests.post('http://127.0.0.1:8080/query', json=QUERY).json()
+                    GRAPHQLS[item['project']] = {'data': data, 'schemas': item['schemas']}
+                    requests.get('http://127.0.0.1:8080/exit')
                     break
-
+                else:
+                    if timeout > 30:
+                        break
+        except Exception as er:
+            print(er)
+            time.sleep(1)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -70,7 +74,8 @@ def allowed_file(filename):
 
 @app.route('/')
 def upload_form():
-    return render_template('upload.html')
+    root=url_for('upload_form')
+    return render_template('upload.html',root=root)
 
 
 @app.route('/schema')
@@ -109,7 +114,7 @@ def upload_file():
                 # file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
         # flash('File(s) successfully uploaded')
         Q.put({'project': request.form.get('project'), 'schemas': "\n".join(schemas)})
-        return redirect('/')
+        return redirect('/?project='+request.form['project'])
 
 
 if __name__ == "__main__":
